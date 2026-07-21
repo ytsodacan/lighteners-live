@@ -889,39 +889,30 @@ function drawNote(n, y) {
   ctx.drawImage(img, Math.round(x - w / 2), Math.round(y - h / 2), Math.round(w), Math.round(h));
 }
 
-// Draws a whole sustained hold (grouped by holdId) as a single continuous,
-// solid rounded bar spanning its real start/end time. The tiny "+"-shaped
-// note sprite was never meant to be stretched into a long bar — doing so
-// (or drawing a chain of them) produced a deformed/gapped look, so instead
-// this fills a plain colored rounded rect, which reads cleanly at any length.
-const HOLD_COLOR = { left: '#21f17b', right: '#75edff' };
+// Draws a whole sustained hold (grouped by holdId) as a single continuous
+// bar using the original note sprite (the same "leftHold"/"rightHold" frame
+// used elsewhere), stretched across its real start/end time. Using the real
+// start/end time (instead of sampling the min/max Y of whichever discrete
+// pieces happen to still be unresolved) is what makes it read as one solid,
+// touching note instead of a row of separated dashes/crosses.
 function drawHoldBar(g, t) {
-  const barW = 32;
+  const frameIdx = g.lane === 'left' ? NOTE_FRAME.leftHold : NOTE_FRAME.rightHold;
+  const img = IMG['note_frame' + frameIdx];
+  if (!img) return;
   const x = LANE_X[g.lane];
+  const w = img.width * 3.2;
+  const capH = Math.max(img.height * 3.2, 10);
   // The bar's bottom (already-played) edge pins at the hit line once the
   // hold's leading edge arrives there; its top (not-yet-played) edge keeps
   // falling until the hold's end time also arrives.
   const yAtStart = HIT_Y - (g.startTime - t) * FALL_RATE;
   const yAtEnd = HIT_Y - (g.endTime - t) * FALL_RATE;
-  const bottom = Math.min(yAtStart, HIT_Y);
-  const top = Math.min(yAtEnd, bottom - 6);
+  const bottom = Math.min(yAtStart, HIT_Y) + capH / 2;
+  const top = Math.min(yAtEnd, bottom - capH) - capH / 2;
   if (bottom < SPAWN_Y - 20 || top > DESPAWN_Y) return;
-  const r = barW / 2;
-  ctx.save();
-  ctx.fillStyle = HOLD_COLOR[g.lane] || '#ffffff';
-  ctx.beginPath();
-  if (ctx.roundRect) ctx.roundRect(x - barW / 2, top, barW, bottom - top, r); else ctx.rect(x - barW / 2, top, barW, bottom - top);
-  ctx.fill();
-  // Subtle highlight stripe down the middle for a bit of depth/polish.
-  ctx.globalAlpha = 0.3;
-  ctx.fillStyle = '#ffffff';
-  const stripeH = Math.max(0, bottom - top - 8);
-  ctx.beginPath();
-  if (stripeH > 0) {
-    if (ctx.roundRect) ctx.roundRect(x - 4, top + 4, 8, stripeH, 3); else ctx.rect(x - 4, top + 4, 8, stripeH);
-    ctx.fill();
-  }
-  ctx.restore();
+  // Stretch the note sprite across the whole span so it reads as one solid,
+  // connected bar rather than discrete overlapping pieces.
+  ctx.drawImage(img, Math.round(x - w / 2), Math.round(top), Math.round(w), Math.round(bottom - top));
 }
 
 function drawHitIndicator(lane) {
