@@ -571,6 +571,7 @@ function drawKris(cx, cy) {
     state.kris.anim = 'idle';
   }
   const img = IMG['kris_' + anim] || IMG['kris_idle'];
+  if (!img) return;
   const scale = 2.4;
   const w = img.width * scale, h = img.height * scale;
   ctx.drawImage(img, Math.round(cx - w / 2), Math.round(cy - h), Math.round(w), Math.round(h));
@@ -693,7 +694,7 @@ function endSong() {
 // ---------------- Boot ----------------
 (async function init() {
   buildSongList();
-  requestAnimationFrame(loop);
   await preloadSprites();
   try { await document.fonts.load('20px Deltarune'); } catch (e) {}
+  requestAnimationFrame(loop);
 })();
