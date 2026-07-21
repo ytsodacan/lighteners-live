@@ -26,6 +26,8 @@ html, body {
 #menu-screen {
   background: radial-gradient(ellipse at 50% 0%, #241a3d 0%, #0a0a0f 65%);
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  touch-action: pan-y;
   padding: 24px 0;
 }
 
@@ -125,6 +127,7 @@ kbd {
   position: absolute; inset: 0;
   display: flex;
   z-index: 5;
+  touch-action: none;
 }
 .touch-btn {
   flex: 1;
@@ -136,6 +139,7 @@ kbd {
   letter-spacing: 3px;
   color: rgba(255,255,255,0.55);
   transition: background-color 0.06s ease-out;
+  touch-action: none;
 }
 .touch-left { background: rgba(33,241,123,0.06); border-right: 1px solid rgba(255,255,255,0.08); }
 .touch-right { background: rgba(117,224,255,0.06); }

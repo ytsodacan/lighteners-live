@@ -263,6 +263,8 @@ function launchGame(chart, audioEl, title, meta) {
   state.gameStartPerf = performance.now();
   updateScoreDisplay();
   resizeCanvas();
+  lastTime = performance.now();
+  requestAnimationFrame(loop);
 }
 
 function quitToMenu() {
@@ -327,6 +329,7 @@ const touchRight = document.getElementById('touch-right');
 function bindTouchButton(el, lane) {
   const activePointers = new Set();
   el.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
     el.setPointerCapture(e.pointerId);
     if (activePointers.has(e.pointerId)) return;
     activePointers.add(e.pointerId);
@@ -334,6 +337,7 @@ function bindTouchButton(el, lane) {
     laneCountChange(lane, +1);
   });
   function release(e) {
+    e.preventDefault();
     if (!activePointers.has(e.pointerId)) return;
     activePointers.delete(e.pointerId);
     if (activePointers.size === 0) el.classList.remove('pressed');
@@ -342,9 +346,29 @@ function bindTouchButton(el, lane) {
   el.addEventListener('pointerup', release);
   el.addEventListener('pointercancel', release);
   el.addEventListener('pointerleave', release);
+  // Rapid taps get misread by iOS/Android as a "double-tap to zoom" gesture;
+  // touch-action alone doesn't always suppress it in time, so also block the
+  // gesture events directly.
+  el.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
+  el.addEventListener('dblclick', (e) => e.preventDefault());
 }
 bindTouchButton(touchLeft, 'left');
 bindTouchButton(touchRight, 'right');
+document.addEventListener('gesturestart', (e) => e.preventDefault()); // iOS Safari pinch-zoom gesture
+
+// Safety net: if a zoom slips through anyway (some Android WebViews ignore
+// user-scalable=no), force it back by re-applying the viewport meta tag.
+const viewportMeta = document.querySelector('meta[name="viewport"]');
+function resetZoom() {
+  if (!viewportMeta) return;
+  const content = viewportMeta.getAttribute('content');
+  viewportMeta.setAttribute('content', content + ',user-scalable=no');
+  viewportMeta.setAttribute('content', content);
+}
+document.addEventListener('gestureend', resetZoom);
+window.visualViewport?.addEventListener('resize', () => {
+  if (window.visualViewport.scale > 1.01) resetZoom();
+});
 
 function onLaneJustPressed(lane) {
   playSfx(lane);
@@ -358,10 +382,17 @@ function onLaneJustReleased(lane) {
   state.kris.until = songTimeNow() + 0.15;
 }
 
+const SFX_POOL_SIZE = 4;
+const sfxPool = {
+  left: Array.from({ length: SFX_POOL_SIZE }, () => { const a = new Audio('assets/audio/sfx/left_hit.wav'); a.preload = 'auto'; a.volume = 0.35; return a; }),
+  right: Array.from({ length: SFX_POOL_SIZE }, () => { const a = new Audio('assets/audio/sfx/right_hit.wav'); a.preload = 'auto'; a.volume = 0.35; return a; }),
+};
+let sfxPoolIdx = { left: 0, right: 0 };
 function playSfx(lane) {
-  const src = lane === 'left' ? 'assets/audio/sfx/left_hit.wav' : 'assets/audio/sfx/right_hit.wav';
-  const a = new Audio(src);
-  a.volume = 0.35;
+  const pool = sfxPool[lane];
+  const a = pool[sfxPoolIdx[lane]];
+  sfxPoolIdx[lane] = (sfxPoolIdx[lane] + 1) % pool.length;
+  a.currentTime = 0;
   a.play().catch(() => {});
 }
 
@@ -626,8 +657,13 @@ function drawNote(n, y) {
   else frameIdx = n.lane === 'left' ? NOTE_FRAME.left : NOTE_FRAME.right;
   const img = IMG['note_frame' + frameIdx];
   if (!img) return;
-  const scale = n.isHold ? 3.2 : 4.2;
-  const w = img.width * scale, h = img.height * scale;
+  // Hold pieces are meant to blend into one continuous bar, so they keep a
+  // uniform scale. Tap notes get a taller width scale but a shorter height
+  // scale so that closely-spaced notes (fast 16th-note runs) stay visually
+  // distinct instead of stacking into an unreadable blob.
+  const wScale = n.isHold ? 3.2 : 3.6;
+  const hScale = n.isHold ? 3.2 : 1.8;
+  const w = img.width * wScale, h = img.height * hScale;
   const x = LANE_X[n.lane];
   ctx.drawImage(img, Math.round(x - w / 2), Math.round(y - h / 2), Math.round(w), Math.round(h));
 }
@@ -699,6 +735,8 @@ function drawScoreHud() {
 // ---------------- Main loop ----------------
 let lastTime = performance.now();
 function loop(now) {
+  if (state.phase === 'menu') return; // don't keep drawing the hidden game canvas while on the menu
+
   const dt = Math.min(0.05, (now - lastTime) / 1000);
   lastTime = now;
 
