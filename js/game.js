@@ -732,7 +732,12 @@ function spawnNotes() {
   while (state.holdIndex < chart.holdPieces.length && chart.holdPieces[state.holdIndex].time + AUDIO_START_DELAY - AUDIO_DELAY <= t) {
     const piece = chart.holdPieces[state.holdIndex++];
     const targetTime = piece.time + AUDIO_START_DELAY;
-    state.activeNotes.push({ lane: piece.lane, isHold: true, holdId: piece.holdId, targetTime, spawnTime: targetTime - AUDIO_DELAY, hit: false, missed: false });
+    state.activeNotes.push({
+      lane: piece.lane, isHold: true, holdId: piece.holdId, targetTime,
+      holdStartTime: piece.holdStart + AUDIO_START_DELAY,
+      holdEndTime: piece.holdEnd + AUDIO_START_DELAY,
+      spawnTime: targetTime - AUDIO_DELAY, hit: false, missed: false,
+    });
   }
 }
 
@@ -815,22 +820,23 @@ function render() {
   ctx.clip();
 
   // Sustained holds are grouped by holdId and drawn as one continuous bar
-  // (spanning from the earliest to the latest not-yet-resolved piece) so
-  // they read as a single connected note instead of a row of separate dashes.
+  // spanning their real start/end time (not sampled from whichever discrete
+  // pieces happen to still be unresolved), so they always read as a single
+  // solid connected note — never a row of separated dashes/crosses.
   const holdGroups = new Map();
   for (const n of state.activeNotes) {
     if (n.hit || n.missed) continue;
-    const y = noteY(n);
-    if (y < SPAWN_Y - 20 || y > DESPAWN_Y) continue;
     if (n.isHold) {
-      let g = holdGroups.get(n.holdId);
-      if (!g) holdGroups.set(n.holdId, { lane: n.lane, minY: y, maxY: y });
-      else { if (y < g.minY) g.minY = y; if (y > g.maxY) g.maxY = y; }
+      if (!holdGroups.has(n.holdId)) {
+        holdGroups.set(n.holdId, { lane: n.lane, startTime: n.holdStartTime, endTime: n.holdEndTime });
+      }
     } else {
+      const y = noteY(n);
+      if (y < SPAWN_Y - 20 || y > DESPAWN_Y) continue;
       drawNote(n, y);
     }
   }
-  for (const g of holdGroups.values()) drawHoldBar(g);
+  for (const g of holdGroups.values()) drawHoldBar(g, t);
 
   ctx.restore();
 
@@ -883,21 +889,39 @@ function drawNote(n, y) {
   ctx.drawImage(img, Math.round(x - w / 2), Math.round(y - h / 2), Math.round(w), Math.round(h));
 }
 
-// Draws a whole sustained hold (grouped by holdId) as a single continuous
-// connected bar spanning its current leading edge to its trailing edge,
-// instead of a row of separate dashes.
-function drawHoldBar(g) {
-  const frameIdx = g.lane === 'left' ? NOTE_FRAME.leftHold : NOTE_FRAME.rightHold;
-  const img = IMG['note_frame' + frameIdx];
-  if (!img) return;
-  const capH = Math.max(img.height * 3.2, 10);
-  const w = img.width * 3.2;
+// Draws a whole sustained hold (grouped by holdId) as a single continuous,
+// solid rounded bar spanning its real start/end time. The tiny "+"-shaped
+// note sprite was never meant to be stretched into a long bar — doing so
+// (or drawing a chain of them) produced a deformed/gapped look, so instead
+// this fills a plain colored rounded rect, which reads cleanly at any length.
+const HOLD_COLOR = { left: '#21f17b', right: '#75edff' };
+function drawHoldBar(g, t) {
+  const barW = 32;
   const x = LANE_X[g.lane];
-  const top = g.minY - capH / 2;
-  const bottom = Math.max(g.maxY + capH / 2, top + capH);
-  // Stretch the note sprite across the whole span so it reads as one solid,
-  // connected bar rather than discrete overlapping pieces.
-  ctx.drawImage(img, Math.round(x - w / 2), Math.round(top), Math.round(w), Math.round(bottom - top));
+  // The bar's bottom (already-played) edge pins at the hit line once the
+  // hold's leading edge arrives there; its top (not-yet-played) edge keeps
+  // falling until the hold's end time also arrives.
+  const yAtStart = HIT_Y - (g.startTime - t) * FALL_RATE;
+  const yAtEnd = HIT_Y - (g.endTime - t) * FALL_RATE;
+  const bottom = Math.min(yAtStart, HIT_Y);
+  const top = Math.min(yAtEnd, bottom - 6);
+  if (bottom < SPAWN_Y - 20 || top > DESPAWN_Y) return;
+  const r = barW / 2;
+  ctx.save();
+  ctx.fillStyle = HOLD_COLOR[g.lane] || '#ffffff';
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x - barW / 2, top, barW, bottom - top, r); else ctx.rect(x - barW / 2, top, barW, bottom - top);
+  ctx.fill();
+  // Subtle highlight stripe down the middle for a bit of depth/polish.
+  ctx.globalAlpha = 0.3;
+  ctx.fillStyle = '#ffffff';
+  const stripeH = Math.max(0, bottom - top - 8);
+  ctx.beginPath();
+  if (stripeH > 0) {
+    if (ctx.roundRect) ctx.roundRect(x - 4, top + 4, 8, stripeH, 3); else ctx.rect(x - 4, top + 4, 8, stripeH);
+    ctx.fill();
+  }
+  ctx.restore();
 }
 
 function drawHitIndicator(lane) {

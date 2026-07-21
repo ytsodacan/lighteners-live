@@ -208,7 +208,7 @@ function buildChartFromMidi(parsed, opts) {
     const id = holdId++;
     let t = span.start;
     while (t < span.end) {
-      holdPieces.push({ time: t, lane: span.lane, holdId: id });
+      holdPieces.push({ time: t, lane: span.lane, holdId: id, holdStart: span.start, holdEnd: span.end });
       t += HOLD_SPAWN_INTERVAL;
     }
   }
