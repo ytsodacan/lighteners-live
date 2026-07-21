@@ -343,6 +343,54 @@ customPlayBtn.addEventListener('click', async () => {
   }
 });
 
+// ---------------- Custom map: song zip bundle ----------------
+const customZipInput = document.getElementById('custom-zip-input');
+customZipInput.addEventListener('change', async () => {
+  const zipFile = customZipInput.files[0];
+  if (!zipFile) return;
+  unlockAudioCtx(); // must happen synchronously off the change/click gesture
+  customStatus.textContent = '';
+  showLoading(true, 'Reading zip…');
+  try {
+    if (typeof JSZip === 'undefined') throw new Error('zip support failed to load (check your connection)');
+    const zip = await JSZip.loadAsync(zipFile);
+    let midEntry = null, audioEntry = null, infoEntry = null;
+    zip.forEach((relPath, entry) => {
+      if (entry.dir) return;
+      const lower = relPath.toLowerCase();
+      if (!midEntry && /\.(mid|midi)$/.test(lower)) midEntry = entry;
+      else if (!audioEntry && /\.(mp3|wav|ogg|m4a|flac)$/.test(lower)) audioEntry = entry;
+      else if (!infoEntry && lower.endsWith('.txt')) infoEntry = entry;
+    });
+    if (!midEntry) throw new Error('No .mid chart found inside the zip');
+    if (!audioEntry) throw new Error('No audio file found inside the zip');
+
+    showLoading(true, 'Extracting chart…');
+    const midBuf = await midEntry.async('arraybuffer');
+    const parsed = parseMidi(midBuf);
+    const chart = buildChartFromMidi(parsed, { holdSpawnInterval: HOLD_SCORE_INTERVAL });
+    if (chart.taps.length === 0 && chart.holdPieces.length === 0) {
+      throw new Error('No recognized notes found in chart (expects note numbers 38/36/39/35).');
+    }
+
+    showLoading(true, 'Decoding audio…');
+    const audioArrayBuf = await audioEntry.async('arraybuffer');
+    const audioBuffer = await audioCtx.decodeAudioData(audioArrayBuf);
+
+    let info = {};
+    if (infoEntry) {
+      try { info = parseSongInfoText(await infoEntry.async('text')); } catch (e) { /* ignore malformed info.txt */ }
+    }
+    const title = info.title || zipFile.name.replace(/\.zip$/i, '');
+    launchGame(chart, audioBuffer, title, { difficulty: info.difficulty, composer: info.composer, description: info.description });
+  } catch (err) {
+    customStatus.textContent = 'Error: ' + err.message;
+  } finally {
+    showLoading(false);
+    customZipInput.value = '';
+  }
+});
+
 // ---------------- Launching gameplay ----------------
 function launchGame(chart, audioBuffer, title, meta) {
   state.chart = chart;
@@ -669,9 +717,9 @@ function render() {
   // Characters (bottom row, simple bob animation)
   const t = songTimeNow();
   const bob = Math.sin(t * 3) * 2;
-  drawCharacter('susie', 160, 470 + bob, 1.7);
-  drawCharacter('ralsei', 480, 470 + Math.sin(t * 3 + 1) * 2, 2.6);
-  drawKris(320, 474);
+  drawCharacter('susie', 160, 400 + bob, 1.7);
+  drawCharacter('ralsei', 480, 400 + Math.sin(t * 3 + 1) * 2, 2.6);
+  drawKris(320, 404);
 
   // Board backdrop
   drawFrame(IMG['rhythmboard_frame0'], BOARD_RECT.x, BOARD_RECT.y, BOARD_RECT.w, BOARD_RECT.h);
@@ -682,7 +730,7 @@ function render() {
   ctx.rect(BOARD_RECT.x, BOARD_RECT.y, BOARD_RECT.w, BOARD_RECT.h);
   ctx.clip();
   for (const n of state.activeNotes) {
-    if (n.hit) continue;
+    if (n.hit || n.missed) continue;
     const y = noteY(n);
     if (y < SPAWN_Y - 20 || y > DESPAWN_Y) continue;
     drawNote(n, y);
@@ -739,7 +787,7 @@ function drawNote(n, y) {
   // scale so that closely-spaced notes (fast 16th-note runs) stay visually
   // distinct instead of stacking into an unreadable blob.
   const wScale = n.isHold ? 3.2 : 3.6;
-  const hScale = n.isHold ? 3.2 : 2.2;
+  const hScale = n.isHold ? 3.2 : 3.6;
   const w = img.width * wScale, h = img.height * hScale;
   const x = LANE_X[n.lane];
   ctx.drawImage(img, Math.round(x - w / 2), Math.round(y - h / 2), Math.round(w), Math.round(h));

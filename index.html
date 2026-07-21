@@ -40,6 +40,13 @@
         </label>
         <button id="custom-play-btn" class="play-btn" disabled>Load &amp; Play Custom Map</button>
         <p class="hint small" id="custom-status"></p>
+
+        <p class="hint" style="margin-top:14px;">Or upload one <b>.zip</b> containing the chart + audio
+          (and optionally a cover image / info.txt) — it'll be extracted and launched automatically.</p>
+        <label class="file-row">
+          <span>Song Zip (.zip)</span>
+          <input type="file" id="custom-zip-input" accept=".zip">
+        </label>
       </div>
 
       <div class="controls-help">
@@ -105,6 +112,7 @@
 
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="js/midi.js"></script>
 <script src="js/game.js"></script>
 </body>
