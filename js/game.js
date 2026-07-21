@@ -9,15 +9,23 @@ const GOOD_WINDOW = 0.35;
 const PERFECT_SCORE = 50;
 const GOOD_SCORE = 25;
 const HOLD_SCORE_PER_SECOND = 10.0;
-const HOLD_SCORE_INTERVAL = 0.08;
-const AUDIO_DELAY = 5.0;        // seconds a note takes to fall to the hit line
+// How often a sustained hold is chopped into discrete pieces. Bumped up from
+// 0.08s so long holds don't flood activeNotes with hundreds of near-identical
+// objects (a big source of the in-game lag during rapid/rolled sections).
+const HOLD_SCORE_INTERVAL = 0.12;
+const AUDIO_DELAY = 2.3;        // seconds a note takes to fall to the hit line (lower = falls faster)
 const AUDIO_START_DELAY = 1.1;  // seconds before the song audio begins playing
 
 const CANVAS_W = 640, CANVAS_H = 480;
 
 // Lane / board geometry (derived from the original Godot scene layout)
 const LANE_X = { left: 292, right: 348 };
-const SPAWN_Y = 78;
+// Notes now spawn above the visible board (negative Y) and travel a longer
+// distance in less time, which — combined with the shorter AUDIO_DELAY above —
+// roughly triples the fall speed and, more importantly, the *pixel gap*
+// between notes that are close together in time, so fast runs no longer
+// visually stack/overlap on the board.
+const SPAWN_Y = -30;
 const HIT_Y = 325;
 const FALL_RATE = (HIT_Y - SPAWN_Y) / AUDIO_DELAY; // px/sec
 const DESPAWN_Y = HIT_Y + FALL_RATE * (GOOD_WINDOW + 0.5);
@@ -53,6 +61,100 @@ for (const anim of ['perfect', 'almost', 'miss']) {
   for (let i = 0; i < 5; i++) SPRITE_NAMES.push(`hitfx_${anim}_${i}`);
 }
 
+// ---------------- Audio engine (Web Audio API) ----------------
+// Everything — the song and the hit SFX — is decoded into an AudioBuffer and
+// played through AudioBufferSourceNodes instead of <audio> elements. Two big
+// wins over the old HTMLAudioElement approach:
+//   1) The song is scheduled sample-accurately via audioCtx.currentTime, and
+//      the entire game clock (songTimeNow) is derived from that SAME clock,
+//      so notes can never drift out of sync with the music — there's nothing
+//      left to desync, since visuals and audio share one clock.
+//   2) Hit SFX fire via lightweight one-shot buffer sources instead of
+//      resetting/replaying <audio> elements, which removes the frame-jank
+//      that showed up when mashing/rolling notes quickly in a row.
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function unlockAudioCtx() {
+  if (audioCtx.state === 'suspended') audioCtx.resume().catch(() => {});
+}
+
+async function fetchArrayBufferWithProgress(url, onProgress) {
+  const resp = await fetch(url);
+  if (!resp.ok) throw new Error('failed to fetch audio');
+  const total = Number(resp.headers.get('content-length')) || 0;
+  if (!resp.body || !total) return await resp.arrayBuffer();
+  const reader = resp.body.getReader();
+  const chunks = [];
+  let received = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress(received / total);
+  }
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length; }
+  return out.buffer;
+}
+
+async function loadAudioBufferFromUrl(url, onProgress) {
+  const arrayBuf = await fetchArrayBufferWithProgress(url, onProgress || (() => {}));
+  return await audioCtx.decodeAudioData(arrayBuf);
+}
+
+async function loadAudioBufferFromFile(file, onProgress) {
+  onProgress && onProgress(0.15);
+  const arrayBuf = await file.arrayBuffer();
+  onProgress && onProgress(0.6);
+  const buf = await audioCtx.decodeAudioData(arrayBuf);
+  onProgress && onProgress(1);
+  return buf;
+}
+
+let sfxBuffers = { left: null, right: null };
+async function preloadSfx() {
+  try {
+    const [left, right] = await Promise.all([
+      loadAudioBufferFromUrl('assets/audio/sfx/left_hit.wav'),
+      loadAudioBufferFromUrl('assets/audio/sfx/right_hit.wav'),
+    ]);
+    sfxBuffers.left = left;
+    sfxBuffers.right = right;
+  } catch (e) { /* SFX are non-critical; game still works without them */ }
+}
+
+function playSfx(lane) {
+  const buf = sfxBuffers[lane];
+  if (!buf || audioCtx.state !== 'running') return;
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0.35;
+  src.connect(gain).connect(audioCtx.destination);
+  src.start();
+}
+
+function stopSongPlayback() {
+  if (state.songSource) {
+    try { state.songSource.stop(); } catch (e) { /* already stopped */ }
+    state.songSource.disconnect();
+    state.songSource = null;
+  }
+}
+
+// Schedules the currently-loaded song buffer to start at a precise point on
+// the AudioContext's own clock (atCtxTime), sample-accurate — no polling.
+function scheduleSongPlayback(atCtxTime, offset) {
+  stopSongPlayback();
+  if (!state.audioBuffer) return;
+  const src = audioCtx.createBufferSource();
+  src.buffer = state.audioBuffer;
+  src.connect(audioCtx.destination);
+  src.start(Math.max(audioCtx.currentTime, atCtxTime), Math.max(0, offset || 0));
+  state.songSource = src;
+}
+
 function loadImage(src) {
   return new Promise((resolve) => {
     const img = new Image();
@@ -80,6 +182,7 @@ const menuScreen = document.getElementById('menu-screen');
 const gameScreen = document.getElementById('game-screen');
 const songListEl = document.getElementById('song-list');
 const loadingOverlay = document.getElementById('loading-overlay');
+const loadingStatusEl = document.getElementById('loading-status');
 const pauseOverlay = document.getElementById('pause-overlay');
 const endOverlay = document.getElementById('end-overlay');
 const finalScoreEl = document.getElementById('final-score');
@@ -93,10 +196,9 @@ const state = {
   activeNotes: [], // {lane, isHold, holdId, targetTime, hit, missed, spawnTime}
   score: 0,
   combo: 0,
-  gameStartPerf: 0,
-  pausedAt: 0,
-  audioEl: null,
-  audioStarted: false,
+  gameStartCtxTime: 0,
+  audioBuffer: null,
+  songSource: null,
   leftCount: 0, rightCount: 0, // number of physical/touch inputs currently holding each lane
   leftHeld: false, rightHeld: false,
   kris: { anim: 'idle', until: 0 },
@@ -112,7 +214,6 @@ function resetChartState() {
   state.activeNotes = [];
   state.score = 0;
   state.combo = 0;
-  state.audioStarted = false;
   state.kris.anim = 'idle';
   state.hitFx.left = null;
   state.hitFx.right = null;
@@ -140,13 +241,12 @@ function buildSongList() {
 }
 
 async function startBuiltinSong(song) {
-  showLoading(true);
+  unlockAudioCtx(); // must happen synchronously off the click gesture
+  showLoading(true, 'Loading chart…');
   try {
     const [midiBuf, chart] = await loadSongChart(song.mid);
-    const audioEl = new Audio(song.mp3);
-    audioEl.preload = 'auto';
-    await waitForAudioReady(audioEl);
-    launchGame(chart, audioEl, song.name, { difficulty: song.difficulty, composer: song.composer, description: song.description });
+    const audioBuffer = await loadAudioBufferFromUrl(song.mp3, (frac) => setLoadingProgress(frac, 'Loading audio'));
+    launchGame(chart, audioBuffer, song.name, { difficulty: song.difficulty, composer: song.composer, description: song.description });
   } catch (err) {
     alert('Could not load song: ' + err.message);
   } finally {
@@ -165,18 +265,14 @@ async function loadSongChart(midUrl) {
 
 function HOLD_SPAWN_INTERVAL_CFG() { return HOLD_SCORE_INTERVAL; }
 
-function waitForAudioReady(audioEl) {
-  return new Promise((resolve, reject) => {
-    if (audioEl.readyState >= 3) return resolve();
-    audioEl.addEventListener('canplaythrough', () => resolve(), { once: true });
-    audioEl.addEventListener('error', () => reject(new Error('audio failed to load')), { once: true });
-    // Safety timeout in case canplaythrough never fires for long streams
-    setTimeout(resolve, 8000);
-  });
+function showLoading(show, text) {
+  loadingOverlay.classList.toggle('hidden', !show);
+  if (loadingStatusEl) loadingStatusEl.textContent = text || '';
 }
 
-function showLoading(show) {
-  loadingOverlay.classList.toggle('hidden', !show);
+function setLoadingProgress(frac, label) {
+  if (!loadingStatusEl) return;
+  loadingStatusEl.textContent = `${label} ${Math.round(Math.max(0, Math.min(1, frac)) * 100)}%`;
 }
 
 // ---------------- Custom map handling ----------------
@@ -221,7 +317,8 @@ function parseSongInfoText(text) {
 
 customPlayBtn.addEventListener('click', async () => {
   if (!customMidiFile || !customAudioFile) return;
-  showLoading(true);
+  unlockAudioCtx(); // must happen synchronously off the click gesture
+  showLoading(true, 'Loading chart…');
   customStatus.textContent = '';
   try {
     const buf = await customMidiFile.arrayBuffer();
@@ -232,16 +329,13 @@ customPlayBtn.addEventListener('click', async () => {
       showLoading(false);
       return;
     }
-    const objUrl = URL.createObjectURL(customAudioFile);
-    const audioEl = new Audio(objUrl);
-    audioEl.preload = 'auto';
-    await waitForAudioReady(audioEl);
+    const audioBuffer = await loadAudioBufferFromFile(customAudioFile, (frac) => setLoadingProgress(frac, 'Loading audio'));
     let info = {};
     if (customInfoFile) {
       try { info = parseSongInfoText(await customInfoFile.text()); } catch (e) { /* ignore malformed info.txt */ }
     }
     const title = customTitleInput.value.trim() || customMidiFile.name.replace(/\.[^.]+$/, '');
-    launchGame(chart, audioEl, title, { difficulty: info.difficulty, composer: info.composer, description: info.description });
+    launchGame(chart, audioBuffer, title, { difficulty: info.difficulty, composer: info.composer, description: info.description });
   } catch (err) {
     customStatus.textContent = 'Error: ' + err.message;
   } finally {
@@ -250,9 +344,9 @@ customPlayBtn.addEventListener('click', async () => {
 });
 
 // ---------------- Launching gameplay ----------------
-function launchGame(chart, audioEl, title, meta) {
+function launchGame(chart, audioBuffer, title, meta) {
   state.chart = chart;
-  state.audioEl = audioEl;
+  state.audioBuffer = audioBuffer;
   state.songMeta = { title, ...meta };
   resetChartState();
   menuScreen.classList.add('hidden');
@@ -260,18 +354,19 @@ function launchGame(chart, audioEl, title, meta) {
   pauseOverlay.classList.add('hidden');
   endOverlay.classList.add('hidden');
   state.phase = 'perform';
-  state.gameStartPerf = performance.now();
+  state.gameStartCtxTime = audioCtx.currentTime;
+  // Schedule the song sample-accurately on the audio clock itself — the note
+  // fall timing (songTimeNow, below) is driven by this exact same clock, so
+  // there is no separate "poll and call .play()" step left to drift.
+  scheduleSongPlayback(state.gameStartCtxTime + AUDIO_START_DELAY, 0);
   updateScoreDisplay();
   resizeCanvas();
-  lastTime = performance.now();
   requestAnimationFrame(loop);
 }
 
 function quitToMenu() {
-  if (state.audioEl) {
-    state.audioEl.pause();
-    state.audioEl = null;
-  }
+  stopSongPlayback();
+  state.audioBuffer = null;
   state.phase = 'menu';
   gameScreen.classList.add('hidden');
   pauseOverlay.classList.add('hidden');
@@ -280,9 +375,11 @@ function quitToMenu() {
 }
 
 // ---------------- Time ----------------
+// Driven entirely by the AudioContext's own clock. When the context is
+// suspended (pause), currentTime simply stops advancing, so notes, the song,
+// and the visuals all freeze/resume in perfect lockstep automatically.
 function songTimeNow() {
-  if (state.phase === 'paused') return state.pausedAt;
-  return (performance.now() - state.gameStartPerf) / 1000;
+  return audioCtx.currentTime - state.gameStartCtxTime;
 }
 
 // ---------------- Input handling ----------------
@@ -382,20 +479,6 @@ function onLaneJustReleased(lane) {
   state.kris.until = songTimeNow() + 0.15;
 }
 
-const SFX_POOL_SIZE = 4;
-const sfxPool = {
-  left: Array.from({ length: SFX_POOL_SIZE }, () => { const a = new Audio('assets/audio/sfx/left_hit.wav'); a.preload = 'auto'; a.volume = 0.35; return a; }),
-  right: Array.from({ length: SFX_POOL_SIZE }, () => { const a = new Audio('assets/audio/sfx/right_hit.wav'); a.preload = 'auto'; a.volume = 0.35; return a; }),
-};
-let sfxPoolIdx = { left: 0, right: 0 };
-function playSfx(lane) {
-  const pool = sfxPool[lane];
-  const a = pool[sfxPoolIdx[lane]];
-  sfxPoolIdx[lane] = (sfxPoolIdx[lane] + 1) % pool.length;
-  a.currentTime = 0;
-  a.play().catch(() => {});
-}
-
 // ---------------- Restart hold ----------------
 const restartBtn = document.getElementById('restart-btn');
 const restartRing = document.getElementById('restart-ring');
@@ -429,8 +512,8 @@ function updateRestartHold() {
 
 function restartSong() {
   resetChartState();
-  if (state.audioEl) { state.audioEl.pause(); state.audioEl.currentTime = 0; }
-  state.gameStartPerf = performance.now();
+  state.gameStartCtxTime = audioCtx.currentTime;
+  scheduleSongPlayback(state.gameStartCtxTime + AUDIO_START_DELAY, 0);
   state.phase = 'perform';
   updateScoreDisplay();
   pauseOverlay.classList.add('hidden');
@@ -447,19 +530,13 @@ document.getElementById('end-menu-btn').addEventListener('click', quitToMenu);
 
 function togglePause() {
   if (state.phase === 'perform') {
-    state.pausedAt = songTimeNow();
     state.phase = 'paused';
-    if (state.audioEl && !state.audioEl.paused) state.audioEl.pause();
+    audioCtx.suspend().catch(() => {});
     pauseOverlay.classList.remove('hidden');
   } else if (state.phase === 'paused') {
-    state.gameStartPerf = performance.now() - state.pausedAt * 1000;
     state.phase = 'perform';
     pauseOverlay.classList.add('hidden');
-    // resume audio if it should already be playing
-    if (state.audioEl && state.audioStarted) {
-      state.audioEl.currentTime = Math.max(0, state.pausedAt - AUDIO_START_DELAY);
-      state.audioEl.play().catch(() => {});
-    }
+    audioCtx.resume().catch(() => {});
   }
 }
 
@@ -550,10 +627,10 @@ function updateNotes(dt) {
       }
     }
   }
-  // garbage collect
-  if (state.activeNotes.length > 400) {
-    state.activeNotes = state.activeNotes.filter(n => !(n.hit || n.missed) || (t - n.targetTime) < 1.0);
-  }
+  // Garbage collect every frame (not just once the array balloons past some
+  // threshold) so hit/missed notes don't pile up and slow down the per-frame
+  // update loop, hitLane()'s scan, and rendering during dense/rolled runs.
+  state.activeNotes = state.activeNotes.filter(n => !(n.hit || n.missed) || (t - n.targetTime) < 1.0);
 }
 
 function noteY(note) {
@@ -662,7 +739,7 @@ function drawNote(n, y) {
   // scale so that closely-spaced notes (fast 16th-note runs) stay visually
   // distinct instead of stacking into an unreadable blob.
   const wScale = n.isHold ? 3.2 : 3.6;
-  const hScale = n.isHold ? 3.2 : 1.8;
+  const hScale = n.isHold ? 3.2 : 2.2;
   const w = img.width * wScale, h = img.height * hScale;
   const x = LANE_X[n.lane];
   ctx.drawImage(img, Math.round(x - w / 2), Math.round(y - h / 2), Math.round(w), Math.round(h));
@@ -742,10 +819,6 @@ function loop(now) {
 
   if (state.phase === 'perform') {
     const t = songTimeNow();
-    if (!state.audioStarted && t >= AUDIO_START_DELAY) {
-      state.audioStarted = true;
-      if (state.audioEl) state.audioEl.play().catch(() => {});
-    }
     spawnNotes();
     updateNotes(dt);
     updateRestartHold();
@@ -768,7 +841,7 @@ function checkSongEnd(t) {
 
 function endSong() {
   state.phase = 'ended';
-  if (state.audioEl) state.audioEl.pause();
+  stopSongPlayback();
   finalScoreEl.textContent = 'SCORE ' + Math.floor(state.score);
   endOverlay.classList.remove('hidden');
 }
@@ -776,7 +849,7 @@ function endSong() {
 // ---------------- Boot ----------------
 (async function init() {
   buildSongList();
-  await preloadSprites();
+  await Promise.all([preloadSprites(), preloadSfx()]);
   try { await document.fonts.load('20px Deltarune'); } catch (e) {}
   requestAnimationFrame(loop);
 })();
