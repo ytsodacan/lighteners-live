@@ -32,6 +32,11 @@ const BUILTIN_SONGS = [
   { id: 'bat', name: 'Raise Up Your Bat', mid: 'assets/audio/bat/chart.mid', mp3: 'assets/audio/bat/song.mp3' },
   { id: 'asgore', name: 'ASGORE', mid: 'assets/audio/asgore/chart.mid', mp3: 'assets/audio/asgore/song.mp3' },
   { id: 'hopes', name: 'Hopes and Dreams', mid: 'assets/audio/hopes/chart.mid', mp3: 'assets/audio/hopes/song.mp3' },
+  {
+    id: 'cutie', name: 'Cutie Mew Mew Magic',
+    mid: 'assets/audio/cutie/chart.mid', mp3: 'assets/audio/cutie/song.mp3', cover: 'assets/audio/cutie/cover.jpg',
+    difficulty: 'Very Hard', composer: 'Toby Fox', description: 'T-Rank 93,000 \u00b7 S-Rank 91,000',
+  },
 ];
 
 // ---------------- Asset loading ----------------
@@ -120,7 +125,15 @@ function buildSongList() {
   for (const song of BUILTIN_SONGS) {
     const card = document.createElement('div');
     card.className = 'song-card';
-    card.innerHTML = `<span class="name">${song.name}</span><span class="play-icon">&#9654;</span>`;
+    const cover = song.cover ? `<img class="cover" src="${song.cover}" alt="">` : '';
+    const meta = [song.difficulty, song.composer].filter(Boolean).join(' \u2022 ');
+    card.innerHTML = `
+      ${cover}
+      <span class="song-info">
+        <span class="name">${song.name}</span>
+        ${meta ? `<span class="meta">${meta}</span>` : ''}
+      </span>
+      <span class="play-icon">&#9654;</span>`;
     card.addEventListener('click', () => startBuiltinSong(song));
     songListEl.appendChild(card);
   }
@@ -133,7 +146,7 @@ async function startBuiltinSong(song) {
     const audioEl = new Audio(song.mp3);
     audioEl.preload = 'auto';
     await waitForAudioReady(audioEl);
-    launchGame(chart, audioEl, song.name);
+    launchGame(chart, audioEl, song.name, { difficulty: song.difficulty, composer: song.composer, description: song.description });
   } catch (err) {
     alert('Could not load song: ' + err.message);
   } finally {
@@ -170,10 +183,11 @@ function showLoading(show) {
 const customMidiInput = document.getElementById('custom-midi-input');
 const customAudioInput = document.getElementById('custom-audio-input');
 const customTitleInput = document.getElementById('custom-title-input');
+const customInfoInput = document.getElementById('custom-info-input');
 const customPlayBtn = document.getElementById('custom-play-btn');
 const customStatus = document.getElementById('custom-status');
 
-let customMidiFile = null, customAudioFile = null;
+let customMidiFile = null, customAudioFile = null, customInfoFile = null;
 
 customMidiInput.addEventListener('change', () => {
   customMidiFile = customMidiInput.files[0] || null;
@@ -183,9 +197,26 @@ customAudioInput.addEventListener('change', () => {
   customAudioFile = customAudioInput.files[0] || null;
   refreshCustomState();
 });
+customInfoInput.addEventListener('change', () => {
+  customInfoFile = customInfoInput.files[0] || null;
+});
 function refreshCustomState() {
   customPlayBtn.disabled = !(customMidiFile && customAudioFile);
   customStatus.textContent = '';
+}
+
+// Parses the simple "key: value" info.txt format used alongside song
+// packages (difficulty / description / Composer / volume / order).
+function parseSongInfoText(text) {
+  const info = {};
+  for (const line of text.split(/\r?\n/)) {
+    const idx = line.indexOf(':');
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim().toLowerCase();
+    const value = line.slice(idx + 1).trim();
+    if (key && value) info[key] = value;
+  }
+  return info;
 }
 
 customPlayBtn.addEventListener('click', async () => {
@@ -205,8 +236,12 @@ customPlayBtn.addEventListener('click', async () => {
     const audioEl = new Audio(objUrl);
     audioEl.preload = 'auto';
     await waitForAudioReady(audioEl);
+    let info = {};
+    if (customInfoFile) {
+      try { info = parseSongInfoText(await customInfoFile.text()); } catch (e) { /* ignore malformed info.txt */ }
+    }
     const title = customTitleInput.value.trim() || customMidiFile.name.replace(/\.[^.]+$/, '');
-    launchGame(chart, audioEl, title);
+    launchGame(chart, audioEl, title, { difficulty: info.difficulty, composer: info.composer, description: info.description });
   } catch (err) {
     customStatus.textContent = 'Error: ' + err.message;
   } finally {
@@ -215,10 +250,10 @@ customPlayBtn.addEventListener('click', async () => {
 });
 
 // ---------------- Launching gameplay ----------------
-function launchGame(chart, audioEl, title) {
+function launchGame(chart, audioEl, title, meta) {
   state.chart = chart;
   state.audioEl = audioEl;
-  state.songMeta = { title };
+  state.songMeta = { title, ...meta };
   resetChartState();
   menuScreen.classList.add('hidden');
   gameScreen.classList.remove('hidden');
@@ -443,13 +478,21 @@ function updateScoreDisplay() {
 function spawnNotes() {
   const t = songTimeNow();
   const chart = state.chart;
-  while (state.tapIndex < chart.taps.length && chart.taps[state.tapIndex].time <= t) {
+  // chart.taps[].time is measured relative to the start of the song audio
+  // (tick 0 in the MIDI == the first sample of the mp3). The audio itself
+  // doesn't start playing until songTimeNow() reaches AUDIO_START_DELAY, so
+  // the note must reach the hit line at AUDIO_START_DELAY + tap.time to line
+  // up with what's actually playing, and must spawn AUDIO_DELAY seconds
+  // before that so it has time to fall.
+  while (state.tapIndex < chart.taps.length && chart.taps[state.tapIndex].time + AUDIO_START_DELAY - AUDIO_DELAY <= t) {
     const tap = chart.taps[state.tapIndex++];
-    state.activeNotes.push({ lane: tap.lane, isHold: false, targetTime: tap.time + AUDIO_DELAY, spawnTime: tap.time, hit: false, missed: false });
+    const targetTime = tap.time + AUDIO_START_DELAY;
+    state.activeNotes.push({ lane: tap.lane, isHold: false, targetTime, spawnTime: targetTime - AUDIO_DELAY, hit: false, missed: false });
   }
-  while (state.holdIndex < chart.holdPieces.length && chart.holdPieces[state.holdIndex].time <= t) {
+  while (state.holdIndex < chart.holdPieces.length && chart.holdPieces[state.holdIndex].time + AUDIO_START_DELAY - AUDIO_DELAY <= t) {
     const piece = chart.holdPieces[state.holdIndex++];
-    state.activeNotes.push({ lane: piece.lane, isHold: true, holdId: piece.holdId, targetTime: piece.time + AUDIO_DELAY, spawnTime: piece.time, hit: false, missed: false });
+    const targetTime = piece.time + AUDIO_START_DELAY;
+    state.activeNotes.push({ lane: piece.lane, isHold: true, holdId: piece.holdId, targetTime, spawnTime: targetTime - AUDIO_DELAY, hit: false, missed: false });
   }
 }
 
@@ -647,7 +690,8 @@ function drawScoreHud() {
     ctx.textAlign = 'left';
     ctx.font = '13px Deltarune, sans-serif';
     ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.fillText(state.songMeta.title, 20, 30);
+    const label = state.songMeta.difficulty ? `${state.songMeta.title}  \u00b7  ${state.songMeta.difficulty}` : state.songMeta.title;
+    ctx.fillText(label, 20, 30);
   }
   ctx.restore();
 }
@@ -679,7 +723,7 @@ function checkSongEnd(t) {
   if (!chart) return;
   const allSpawned = state.tapIndex >= chart.taps.length && state.holdIndex >= chart.holdPieces.length;
   const noneActive = state.activeNotes.every(n => n.hit || n.missed);
-  if (allSpawned && noneActive && t > chart.duration + AUDIO_DELAY + 1.0) {
+  if (allSpawned && noneActive && t > chart.duration + AUDIO_START_DELAY + 1.0) {
     endSong();
   }
 }

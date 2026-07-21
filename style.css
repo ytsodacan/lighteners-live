@@ -60,7 +60,10 @@ html, body {
 }
 .song-card:hover { background: rgba(150,120,255,0.18); }
 .song-card:active { transform: scale(0.98); }
+.song-card .cover { width: 40px; height: 40px; border-radius: 6px; object-fit: cover; margin-right: 12px; flex-shrink: 0; }
+.song-card .song-info { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .song-card .name { font-size: 17px; }
+.song-card .meta { font-size: 12px; color: #a89ecb; margin-top: 2px; }
 .song-card .play-icon { font-size: 20px; color: #21f17b; }
 
 .custom-map-box, .controls-help {
