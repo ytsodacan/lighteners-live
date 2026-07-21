@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Lightners Live — Web</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="app">
+
+  <!-- ================= MAIN MENU ================= -->
+  <div id="menu-screen" class="screen">
+    <div class="menu-box">
+      <h1 class="title">LIGHTNERS <span>LIVE</span></h1>
+      <p class="subtitle">a Deltarune Ch.3 rhythm-game recreation — web edition</p>
+
+      <div class="song-list" id="song-list"><!-- populated by JS --></div>
+
+      <div class="custom-map-box">
+        <h2>Custom Map</h2>
+        <p class="hint">Upload your own chart (.mid) and song (audio file). Note numbers:
+          <b>38</b>=left tap, <b>36</b>=right tap, <b>39</b>=left hold, <b>35</b>=right hold.</p>
+        <label class="file-row">
+          <span>Chart (.mid)</span>
+          <input type="file" id="custom-midi-input" accept=".mid,.midi">
+        </label>
+        <label class="file-row">
+          <span>Song (audio)</span>
+          <input type="file" id="custom-audio-input" accept="audio/*">
+        </label>
+        <label class="file-row">
+          <span>Title</span>
+          <input type="text" id="custom-title-input" placeholder="My Custom Map">
+        </label>
+        <button id="custom-play-btn" class="play-btn" disabled>Load &amp; Play Custom Map</button>
+        <p class="hint small" id="custom-status"></p>
+      </div>
+
+      <div class="controls-help">
+        <h2>Controls</h2>
+        <p>Left note: <kbd>&larr;</kbd> <kbd>Z</kbd> <kbd>A</kbd> <kbd>F</kbd> <kbd>S</kbd></p>
+        <p>Right note: <kbd>&rarr;</kbd> <kbd>X</kbd> <kbd>D</kbd> <kbd>J</kbd> <kbd>K</kbd></p>
+        <p>Hold <kbd>R</kbd> to restart &middot; <kbd>Esc</kbd> to pause</p>
+        <p>On mobile: tap the left/right halves of the screen.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= GAME SCREEN ================= -->
+  <div id="game-screen" class="screen hidden">
+    <div id="game-stage">
+      <canvas id="game-canvas" width="640" height="480"></canvas>
+
+      <!-- touch controls: two big semi-transparent halves -->
+      <div id="touch-controls">
+        <div id="touch-left" class="touch-btn touch-left" data-lane="left">
+          <span>LEFT</span>
+        </div>
+        <div id="touch-right" class="touch-btn touch-right" data-lane="right">
+          <span>RIGHT</span>
+        </div>
+      </div>
+
+      <div id="hud-top">
+        <button id="pause-btn" class="icon-btn" title="Pause">&#10074;&#10074;</button>
+        <div id="restart-btn" class="icon-btn restart-hold" title="Hold to restart">
+          <svg viewBox="0 0 44 44"><circle class="ring-bg" cx="22" cy="22" r="18"></circle><circle id="restart-ring" class="ring-fg" cx="22" cy="22" r="18"></circle></svg>
+          <span>R</span>
+        </div>
+        <button id="quit-btn" class="icon-btn" title="Quit to menu">&#10005;</button>
+      </div>
+    </div>
+
+    <div id="pause-overlay" class="overlay hidden">
+      <div class="overlay-box">
+        <h2>Paused</h2>
+        <button id="resume-btn" class="play-btn">Resume</button>
+        <button id="menu-btn" class="play-btn secondary">Quit to Menu</button>
+      </div>
+    </div>
+
+    <div id="end-overlay" class="overlay hidden">
+      <div class="overlay-box">
+        <h2>Song Complete!</h2>
+        <p id="final-score" class="final-score">SCORE 0</p>
+        <button id="replay-btn" class="play-btn">Play Again</button>
+        <button id="end-menu-btn" class="play-btn secondary">Back to Menu</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="loading-overlay" class="overlay hidden">
+    <div class="overlay-box">
+      <h2>Loading&hellip;</h2>
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+</div>
+
+<script src="js/midi.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
