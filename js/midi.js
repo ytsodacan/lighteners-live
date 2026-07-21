@@ -180,10 +180,31 @@ function buildChartFromMidi(parsed, opts) {
     }
   }
 
+  // Many MIDI exports re-trigger a "held" note every beat/bar instead of
+  // using one long note-on/note-off — that shows up here as a chain of
+  // separate hold spans with a tiny gap between them. Merge those into one
+  // continuous span per lane so they render (and play) as a single connected
+  // hold instead of a row of visually-separated bars.
+  const MERGE_GAP = 0.15; // seconds
+  function mergeSpans(spans) {
+    spans.sort((a, b) => a.start - b.start);
+    const merged = [];
+    for (const s of spans) {
+      const last = merged[merged.length - 1];
+      if (last && s.start - last.end <= MERGE_GAP) last.end = Math.max(last.end, s.end);
+      else merged.push({ lane: s.lane, start: s.start, end: s.end });
+    }
+    return merged;
+  }
+  const mergedHoldSpans = [
+    ...mergeSpans(holdSpans.filter(s => s.lane === 'left')),
+    ...mergeSpans(holdSpans.filter(s => s.lane === 'right')),
+  ];
+
   // Expand hold spans into discrete pieces spawned every HOLD_SPAWN_INTERVAL, matching original spawn behavior
   const holdPieces = [];
   let holdId = 1;
-  for (const span of holdSpans) {
+  for (const span of mergedHoldSpans) {
     const id = holdId++;
     let t = span.start;
     while (t < span.end) {

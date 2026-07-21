@@ -100,16 +100,51 @@ async function fetchArrayBufferWithProgress(url, onProgress) {
 
 async function loadAudioBufferFromUrl(url, onProgress) {
   const arrayBuf = await fetchArrayBufferWithProgress(url, onProgress || (() => {}));
-  return await audioCtx.decodeAudioData(arrayBuf);
+  return decodeSongAsset(arrayBuf, new Blob([arrayBuf], { type: guessAudioMime(url) }));
 }
 
 async function loadAudioBufferFromFile(file, onProgress) {
   onProgress && onProgress(0.15);
   const arrayBuf = await file.arrayBuffer();
   onProgress && onProgress(0.6);
-  const buf = await audioCtx.decodeAudioData(arrayBuf);
+  const asset = await decodeSongAsset(arrayBuf, file);
   onProgress && onProgress(1);
-  return buf;
+  return asset;
+}
+
+// Some real-world audio files (odd encoder padding, uncommon tag layouts,
+// etc.) get rejected by Web Audio's strict decodeAudioData even though the
+// browser's own <audio> element plays them back fine. Strip any ID3v2 tag
+// first (a common trip-up) and, if decoding still fails, fall back to an
+// <audio>-element-backed source so the song still plays instead of silently
+// not loading.
+function stripId3v2(arrayBuffer) {
+  const bytes = new Uint8Array(arrayBuffer);
+  if (bytes.length > 10 && bytes[0] === 0x49 && bytes[1] === 0x44 && bytes[2] === 0x33) {
+    const size = ((bytes[6] & 0x7f) << 21) | ((bytes[7] & 0x7f) << 14) | ((bytes[8] & 0x7f) << 7) | (bytes[9] & 0x7f);
+    const start = 10 + size;
+    if (start > 10 && start < bytes.length) return bytes.slice(start).buffer;
+  }
+  return arrayBuffer;
+}
+
+function guessAudioMime(name) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith('.wav')) return 'audio/wav';
+  if (lower.endsWith('.ogg')) return 'audio/ogg';
+  if (lower.endsWith('.m4a')) return 'audio/mp4';
+  if (lower.endsWith('.flac')) return 'audio/flac';
+  return 'audio/mpeg';
+}
+
+async function decodeSongAsset(arrayBuffer, blobForFallback) {
+  try {
+    const buffer = await audioCtx.decodeAudioData(stripId3v2(arrayBuffer.slice(0)));
+    return { mode: 'buffer', buffer };
+  } catch (err) {
+    if (!blobForFallback) throw err;
+    return { mode: 'element', blob: blobForFallback };
+  }
 }
 
 let sfxBuffers = { left: null, right: null };
@@ -119,8 +154,8 @@ async function preloadSfx() {
       loadAudioBufferFromUrl('assets/audio/sfx/left_hit.wav'),
       loadAudioBufferFromUrl('assets/audio/sfx/right_hit.wav'),
     ]);
-    sfxBuffers.left = left;
-    sfxBuffers.right = right;
+    sfxBuffers.left = left.mode === 'buffer' ? left.buffer : null;
+    sfxBuffers.right = right.mode === 'buffer' ? right.buffer : null;
   } catch (e) { /* SFX are non-critical; game still works without them */ }
 }
 
@@ -140,6 +175,15 @@ function stopSongPlayback() {
     try { state.songSource.stop(); } catch (e) { /* already stopped */ }
     state.songSource.disconnect();
     state.songSource = null;
+  }
+}
+
+function stopAllAudio() {
+  stopSongPlayback();
+  if (state.mediaEl) {
+    try { state.mediaEl.pause(); } catch (e) { /* ignore */ }
+    state.mediaEl.src = '';
+    state.mediaEl = null;
   }
 }
 
@@ -199,6 +243,11 @@ const state = {
   gameStartCtxTime: 0,
   audioBuffer: null,
   songSource: null,
+  audioMode: 'buffer',       // 'buffer' (Web Audio, sample-accurate) or 'element' (fallback)
+  mediaEl: null,
+  mediaStarted: false,
+  mediaGameStartPerf: 0,
+  mediaPausedAt: 0,
   leftCount: 0, rightCount: 0, // number of physical/touch inputs currently holding each lane
   leftHeld: false, rightHeld: false,
   kris: { anim: 'idle', until: 0 },
@@ -245,8 +294,8 @@ async function startBuiltinSong(song) {
   showLoading(true, 'Loading chart…');
   try {
     const [midiBuf, chart] = await loadSongChart(song.mid);
-    const audioBuffer = await loadAudioBufferFromUrl(song.mp3, (frac) => setLoadingProgress(frac, 'Loading audio'));
-    launchGame(chart, audioBuffer, song.name, { difficulty: song.difficulty, composer: song.composer, description: song.description });
+    const audioAsset = await loadAudioBufferFromUrl(song.mp3, (frac) => setLoadingProgress(frac, 'Loading audio'));
+    launchGame(chart, audioAsset, song.name, { difficulty: song.difficulty, composer: song.composer, description: song.description });
   } catch (err) {
     alert('Could not load song: ' + err.message);
   } finally {
@@ -329,13 +378,13 @@ customPlayBtn.addEventListener('click', async () => {
       showLoading(false);
       return;
     }
-    const audioBuffer = await loadAudioBufferFromFile(customAudioFile, (frac) => setLoadingProgress(frac, 'Loading audio'));
+    const audioAsset = await loadAudioBufferFromFile(customAudioFile, (frac) => setLoadingProgress(frac, 'Loading audio'));
     let info = {};
     if (customInfoFile) {
       try { info = parseSongInfoText(await customInfoFile.text()); } catch (e) { /* ignore malformed info.txt */ }
     }
     const title = customTitleInput.value.trim() || customMidiFile.name.replace(/\.[^.]+$/, '');
-    launchGame(chart, audioBuffer, title, { difficulty: info.difficulty, composer: info.composer, description: info.description });
+    launchGame(chart, audioAsset, title, { difficulty: info.difficulty, composer: info.composer, description: info.description });
   } catch (err) {
     customStatus.textContent = 'Error: ' + err.message;
   } finally {
@@ -374,15 +423,16 @@ customZipInput.addEventListener('change', async () => {
     }
 
     showLoading(true, 'Decoding audio…');
-    const audioArrayBuf = await audioEntry.async('arraybuffer');
-    const audioBuffer = await audioCtx.decodeAudioData(audioArrayBuf);
+    const audioBytes = await audioEntry.async('uint8array');
+    const audioMime = guessAudioMime(audioEntry.name);
+    const audioAsset = await decodeSongAsset(audioBytes.buffer, new Blob([audioBytes], { type: audioMime }));
 
     let info = {};
     if (infoEntry) {
       try { info = parseSongInfoText(await infoEntry.async('text')); } catch (e) { /* ignore malformed info.txt */ }
     }
     const title = info.title || zipFile.name.replace(/\.zip$/i, '');
-    launchGame(chart, audioBuffer, title, { difficulty: info.difficulty, composer: info.composer, description: info.description });
+    launchGame(chart, audioAsset, title, { difficulty: info.difficulty, composer: info.composer, description: info.description });
   } catch (err) {
     customStatus.textContent = 'Error: ' + err.message;
   } finally {
@@ -392,9 +442,8 @@ customZipInput.addEventListener('change', async () => {
 });
 
 // ---------------- Launching gameplay ----------------
-function launchGame(chart, audioBuffer, title, meta) {
+function launchGame(chart, audioAsset, title, meta) {
   state.chart = chart;
-  state.audioBuffer = audioBuffer;
   state.songMeta = { title, ...meta };
   resetChartState();
   menuScreen.classList.add('hidden');
@@ -402,18 +451,31 @@ function launchGame(chart, audioBuffer, title, meta) {
   pauseOverlay.classList.add('hidden');
   endOverlay.classList.add('hidden');
   state.phase = 'perform';
-  state.gameStartCtxTime = audioCtx.currentTime;
-  // Schedule the song sample-accurately on the audio clock itself — the note
-  // fall timing (songTimeNow, below) is driven by this exact same clock, so
-  // there is no separate "poll and call .play()" step left to drift.
-  scheduleSongPlayback(state.gameStartCtxTime + AUDIO_START_DELAY, 0);
+  state.audioMode = audioAsset.mode;
+  if (audioAsset.mode === 'buffer') {
+    state.audioBuffer = audioAsset.buffer;
+    state.gameStartCtxTime = audioCtx.currentTime;
+    // Schedule the song sample-accurately on the audio clock itself — the note
+    // fall timing (songTimeNow, below) is driven by this exact same clock, so
+    // there is no separate "poll and call .play()" step left to drift.
+    scheduleSongPlayback(state.gameStartCtxTime + AUDIO_START_DELAY, 0);
+  } else {
+    // Fallback path for audio files the strict Web Audio decoder rejected:
+    // play through a plain <audio> element instead, timed off performance.now().
+    state.audioBuffer = null;
+    const el = new Audio(URL.createObjectURL(audioAsset.blob));
+    el.preload = 'auto';
+    state.mediaEl = el;
+    state.mediaStarted = false;
+    state.mediaGameStartPerf = performance.now();
+  }
   updateScoreDisplay();
   resizeCanvas();
   requestAnimationFrame(loop);
 }
 
 function quitToMenu() {
-  stopSongPlayback();
+  stopAllAudio();
   state.audioBuffer = null;
   state.phase = 'menu';
   gameScreen.classList.add('hidden');
@@ -423,10 +485,16 @@ function quitToMenu() {
 }
 
 // ---------------- Time ----------------
-// Driven entirely by the AudioContext's own clock. When the context is
-// suspended (pause), currentTime simply stops advancing, so notes, the song,
-// and the visuals all freeze/resume in perfect lockstep automatically.
+// Driven by the AudioContext's own clock when a decoded buffer is playing —
+// when the context is suspended (pause), currentTime simply stops advancing,
+// so notes, the song, and the visuals all freeze/resume in lockstep
+// automatically. The <audio>-element fallback mode uses performance.now()
+// instead, since suspending the context doesn't pause a media element.
 function songTimeNow() {
+  if (state.audioMode === 'element') {
+    if (state.phase === 'paused') return state.mediaPausedAt;
+    return (performance.now() - state.mediaGameStartPerf) / 1000;
+  }
   return audioCtx.currentTime - state.gameStartCtxTime;
 }
 
@@ -560,8 +628,14 @@ function updateRestartHold() {
 
 function restartSong() {
   resetChartState();
-  state.gameStartCtxTime = audioCtx.currentTime;
-  scheduleSongPlayback(state.gameStartCtxTime + AUDIO_START_DELAY, 0);
+  if (state.audioMode === 'element') {
+    if (state.mediaEl) { state.mediaEl.pause(); state.mediaEl.currentTime = 0; }
+    state.mediaStarted = false;
+    state.mediaGameStartPerf = performance.now();
+  } else {
+    state.gameStartCtxTime = audioCtx.currentTime;
+    scheduleSongPlayback(state.gameStartCtxTime + AUDIO_START_DELAY, 0);
+  }
   state.phase = 'perform';
   updateScoreDisplay();
   pauseOverlay.classList.add('hidden');
@@ -579,12 +653,22 @@ document.getElementById('end-menu-btn').addEventListener('click', quitToMenu);
 function togglePause() {
   if (state.phase === 'perform') {
     state.phase = 'paused';
-    audioCtx.suspend().catch(() => {});
+    if (state.audioMode === 'element') {
+      state.mediaPausedAt = songTimeNow();
+      if (state.mediaEl) state.mediaEl.pause();
+    } else {
+      audioCtx.suspend().catch(() => {});
+    }
     pauseOverlay.classList.remove('hidden');
   } else if (state.phase === 'paused') {
     state.phase = 'perform';
     pauseOverlay.classList.add('hidden');
-    audioCtx.resume().catch(() => {});
+    if (state.audioMode === 'element') {
+      state.mediaGameStartPerf = performance.now() - state.mediaPausedAt * 1000;
+      if (state.mediaEl && state.mediaStarted) state.mediaEl.play().catch(() => {});
+    } else {
+      audioCtx.resume().catch(() => {});
+    }
   }
 }
 
@@ -729,12 +813,25 @@ function render() {
   ctx.beginPath();
   ctx.rect(BOARD_RECT.x, BOARD_RECT.y, BOARD_RECT.w, BOARD_RECT.h);
   ctx.clip();
+
+  // Sustained holds are grouped by holdId and drawn as one continuous bar
+  // (spanning from the earliest to the latest not-yet-resolved piece) so
+  // they read as a single connected note instead of a row of separate dashes.
+  const holdGroups = new Map();
   for (const n of state.activeNotes) {
     if (n.hit || n.missed) continue;
     const y = noteY(n);
     if (y < SPAWN_Y - 20 || y > DESPAWN_Y) continue;
-    drawNote(n, y);
+    if (n.isHold) {
+      let g = holdGroups.get(n.holdId);
+      if (!g) holdGroups.set(n.holdId, { lane: n.lane, minY: y, maxY: y });
+      else { if (y < g.minY) g.minY = y; if (y > g.maxY) g.maxY = y; }
+    } else {
+      drawNote(n, y);
+    }
   }
+  for (const g of holdGroups.values()) drawHoldBar(g);
+
   ctx.restore();
 
   // Decorative frame overlay on top
@@ -777,20 +874,30 @@ function drawKris(cx, cy) {
 }
 
 function drawNote(n, y) {
-  let frameIdx;
-  if (n.isHold) frameIdx = n.lane === 'left' ? NOTE_FRAME.leftHold : NOTE_FRAME.rightHold;
-  else frameIdx = n.lane === 'left' ? NOTE_FRAME.left : NOTE_FRAME.right;
+  let frameIdx = n.lane === 'left' ? NOTE_FRAME.left : NOTE_FRAME.right;
   const img = IMG['note_frame' + frameIdx];
   if (!img) return;
-  // Hold pieces are meant to blend into one continuous bar, so they keep a
-  // uniform scale. Tap notes get a taller width scale but a shorter height
-  // scale so that closely-spaced notes (fast 16th-note runs) stay visually
-  // distinct instead of stacking into an unreadable blob.
-  const wScale = n.isHold ? 3.2 : 3.6;
-  const hScale = n.isHold ? 3.2 : 3.6;
+  const wScale = 3.6, hScale = 3.6;
   const w = img.width * wScale, h = img.height * hScale;
   const x = LANE_X[n.lane];
   ctx.drawImage(img, Math.round(x - w / 2), Math.round(y - h / 2), Math.round(w), Math.round(h));
+}
+
+// Draws a whole sustained hold (grouped by holdId) as a single continuous
+// connected bar spanning its current leading edge to its trailing edge,
+// instead of a row of separate dashes.
+function drawHoldBar(g) {
+  const frameIdx = g.lane === 'left' ? NOTE_FRAME.leftHold : NOTE_FRAME.rightHold;
+  const img = IMG['note_frame' + frameIdx];
+  if (!img) return;
+  const capH = Math.max(img.height * 3.2, 10);
+  const w = img.width * 3.2;
+  const x = LANE_X[g.lane];
+  const top = g.minY - capH / 2;
+  const bottom = Math.max(g.maxY + capH / 2, top + capH);
+  // Stretch the note sprite across the whole span so it reads as one solid,
+  // connected bar rather than discrete overlapping pieces.
+  ctx.drawImage(img, Math.round(x - w / 2), Math.round(top), Math.round(w), Math.round(bottom - top));
 }
 
 function drawHitIndicator(lane) {
@@ -867,6 +974,10 @@ function loop(now) {
 
   if (state.phase === 'perform') {
     const t = songTimeNow();
+    if (state.audioMode === 'element' && !state.mediaStarted && t >= AUDIO_START_DELAY) {
+      state.mediaStarted = true;
+      if (state.mediaEl) state.mediaEl.play().catch(() => {});
+    }
     spawnNotes();
     updateNotes(dt);
     updateRestartHold();
@@ -889,7 +1000,7 @@ function checkSongEnd(t) {
 
 function endSong() {
   state.phase = 'ended';
-  stopSongPlayback();
+  stopAllAudio();
   finalScoreEl.textContent = 'SCORE ' + Math.floor(state.score);
   endOverlay.classList.remove('hidden');
 }
