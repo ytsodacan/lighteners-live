@@ -1,412 +1,653 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <!-- Crucial for mobile responsiveness on iOS -->
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <title>AR Hand Geometry & FX</title>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<title>TD // HAND FX ENGINE</title>
 
-  <!-- MediaPipe Dependencies via CDN -->
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm/vision_bundle.js" crossorigin="anonymous"></script>
 
-  <style>
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-      user-select: none;
-      -webkit-user-select: none;
-    }
+<style>
+  @font-face {
+    font-family: 'JBM';
+    src: local('JetBrains Mono'), local('SF Mono'), local('Menlo');
+  }
+  :root{
+    --bg:#0a0a0c;
+    --panel:rgba(14,15,18,0.92);
+    --line:rgba(255,255,255,0.09);
+    --accent:#00ffcc;
+    --accent2:#ff2d6a;
+    --dim:#6b6d76;
+    --text:#e6e7ea;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;user-select:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent;}
+  html,body{width:100%;height:100%;overflow:hidden;background:var(--bg);font-family:'JBM','SF Mono',ui-monospace,Menlo,monospace;}
+  #stage{position:relative;width:100vw;height:100vh;height:100dvh;}
+  video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;}
+  video{display:none;}
 
-    body, html {
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      background-color: #000;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    }
+  /* ---------- HUD (telemetry, top) ---------- */
+  #hud{
+    position:absolute;top:max(14px,env(safe-area-inset-top));left:14px;right:14px;
+    display:flex;justify-content:space-between;align-items:flex-start;
+    pointer-events:none;z-index:9;
+  }
+  .hud-block{
+    background:var(--panel);border:1px solid var(--line);border-radius:10px;
+    padding:8px 12px;color:var(--dim);font-size:10px;letter-spacing:0.5px;
+    backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
+  }
+  .hud-block b{color:var(--accent);font-weight:700;}
+  .hud-row{display:flex;gap:10px;align-items:center;}
+  #scope{width:70px;height:18px;display:block;}
+  #rec-dot{width:7px;height:7px;border-radius:50%;background:var(--accent2);display:none;box-shadow:0 0 6px var(--accent2);}
+  #rec-dot.on{display:inline-block;animation:blink 1s steps(2) infinite;}
+  @keyframes blink{50%{opacity:0.15;}}
 
-    .container {
-      position: relative;
-      width: 100vw;
-      height: 100vh;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-    }
+  /* ---------- top-right quick actions ---------- */
+  #quick{display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:auto;}
+  .qbtn{
+    width:38px;height:38px;border-radius:10px;background:var(--panel);border:1px solid var(--line);
+    color:var(--text);display:flex;align-items:center;justify-content:center;font-size:15px;
+    backdrop-filter:blur(14px);
+  }
+  .qbtn:active{background:rgba(0,255,204,0.15);}
 
-    /* Video element hidden behind canvas, plays inline on iOS */
-    video {
-      position: absolute;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-      display: none;
-    }
+  /* ---------- bottom control dock ---------- */
+  .dock{
+    position:absolute;left:50%;bottom:max(16px,env(safe-area-inset-bottom));transform:translateX(-50%);
+    width:94%;max-width:460px;background:var(--panel);border:1px solid var(--line);border-radius:16px;
+    color:var(--text);z-index:10;backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+    box-shadow:0 20px 50px rgba(0,0,0,0.6);transition:max-height .25s ease;overflow:hidden;
+  }
+  .dock-head{
+    display:flex;justify-content:space-between;align-items:center;padding:12px 16px;cursor:pointer;
+    border-bottom:1px solid var(--line);
+  }
+  .dock-head .tag{font-size:10px;letter-spacing:2px;color:var(--accent);font-weight:700;}
+  .dock-head .sub{font-size:9px;color:var(--dim);letter-spacing:1px;margin-top:2px;}
+  .chev{width:20px;height:20px;color:var(--dim);transition:transform .2s ease;}
+  .dock.collapsed .chev{transform:rotate(180deg);}
+  .dock.collapsed .dock-body{display:none;}
 
-    canvas {
-      position: absolute;
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
+  .dock-body{padding:12px 16px 16px;display:flex;flex-direction:column;gap:12px;max-height:52vh;overflow-y:auto;}
+  .grp-label{font-size:9px;letter-spacing:1.5px;color:var(--dim);text-transform:uppercase;margin-bottom:2px;}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:10px;font-size:12px;}
+  .row label{color:var(--text);opacity:0.85;flex-shrink:0;}
+  select,input[type=range],input[type=color]{
+    background:rgba(255,255,255,0.06);border:1px solid var(--line);color:var(--text);
+    border-radius:8px;padding:6px 8px;font-family:inherit;font-size:12px;
+  }
+  select{flex:1;max-width:62%;}
+  input[type=range]{flex:1;accent-color:var(--accent);}
+  input[type=color]{width:44px;height:30px;padding:2px;}
+  option{background:#111;color:#fff;}
+  .switch{position:relative;width:38px;height:22px;background:rgba(255,255,255,0.08);border:1px solid var(--line);border-radius:20px;flex-shrink:0;}
+  .switch input{opacity:0;width:0;height:0;position:absolute;}
+  .knob{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--dim);transition:.18s;}
+  .switch input:checked + .knob{background:var(--accent);left:18px;box-shadow:0 0 8px var(--accent);}
+  .preset-strip{display:flex;gap:6px;overflow-x:auto;padding-bottom:2px;}
+  .preset-chip{
+    flex-shrink:0;padding:7px 12px;border-radius:20px;border:1px solid var(--line);
+    background:rgba(255,255,255,0.04);font-size:10.5px;letter-spacing:0.5px;color:var(--dim);white-space:nowrap;
+  }
+  .preset-chip.active{color:#000;background:var(--accent);border-color:var(--accent);font-weight:700;}
+  .divider{height:1px;background:var(--line);margin:2px 0;}
 
-    /* Glassmorphism Control Panel for iOS */
-    .controls {
-      position: absolute;
-      bottom: 20px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 90%;
-      max-width: 420px;
-      background: rgba(20, 20, 20, 0.75);
-      backdrop-filter: blur(15px);
-      -webkit-backdrop-filter: blur(15px);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      border-radius: 20px;
-      padding: 16px;
-      color: #fff;
-      z-index: 10;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-      transition: all 0.3s ease;
-    }
+  /* ---------- start / permission / loading screens ---------- */
+  #start-screen,#error-screen{
+    position:absolute;inset:0;background:radial-gradient(circle at 50% 30%, #101014, #08080a 70%);
+    z-index:100;display:flex;flex-direction:column;justify-content:center;align-items:center;
+    color:var(--text);text-align:center;padding:32px;
+  }
+  #start-screen h1{font-size:22px;letter-spacing:3px;color:var(--accent);}
+  #start-screen h1 span{color:var(--dim);}
+  #start-screen p{opacity:0.55;margin-top:10px;font-size:12.5px;max-width:280px;line-height:1.5;}
+  .grid-bg{position:absolute;inset:0;opacity:0.15;
+    background-image:linear-gradient(var(--accent) 1px, transparent 1px), linear-gradient(90deg, var(--accent) 1px, transparent 1px);
+    background-size:34px 34px;mask-image:radial-gradient(circle at 50% 40%, #000 0%, transparent 70%);
+  }
+  #start-btn{
+    margin-top:28px;padding:16px 44px;font-size:14px;font-weight:700;letter-spacing:1.5px;
+    background:var(--accent);color:#000;border:none;border-radius:40px;box-shadow:0 0 30px rgba(0,255,204,0.35);
+    font-family:inherit;
+  }
+  #start-btn:active{transform:scale(0.97);}
+  #load-status{margin-top:18px;font-size:11px;color:var(--dim);letter-spacing:1px;min-height:16px;}
+  #error-screen{display:none;}
+  #error-screen h2{color:var(--accent2);font-size:16px;letter-spacing:1px;}
+  #error-screen p{margin-top:10px;font-size:12.5px;color:var(--dim);max-width:300px;line-height:1.6;}
+  #retry-btn{margin-top:20px;padding:12px 30px;background:transparent;border:1px solid var(--line);color:var(--text);border-radius:30px;font-family:inherit;font-size:12px;}
 
-    .controls.collapsed .panel-body {
-      display: none;
-    }
-
-    .panel-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      cursor: pointer;
-    }
-
-    .panel-header h2 {
-      font-size: 16px;
-      font-weight: 600;
-      letter-spacing: 0.5px;
-    }
-
-    .toggle-btn {
-      background: rgba(255, 255, 255, 0.2);
-      border: none;
-      color: white;
-      padding: 4px 10px;
-      border-radius: 12px;
-      font-size: 12px;
-    }
-
-    .panel-body {
-      margin-top: 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
-    .control-group {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      font-size: 13px;
-    }
-
-    select, input[type="color"], input[type="range"] {
-      background: rgba(255,255,255,0.1);
-      border: 1px solid rgba(255,255,255,0.2);
-      color: #fff;
-      padding: 6px 10px;
-      border-radius: 8px;
-      outline: none;
-    }
-
-    select option {
-      background: #222;
-      color: #fff;
-    }
-
-    input[type="range"] {
-      width: 110px;
-    }
-
-    /* Start Button Overlay */
-    #start-overlay {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      background: #000;
-      z-index: 100;
-      display: flex;
-      flex-direction: column;
-      justify-content: center;
-      align-items: center;
-      color: white;
-      text-align: center;
-      padding: 20px;
-    }
-
-    #start-btn {
-      margin-top: 20px;
-      padding: 16px 36px;
-      font-size: 18px;
-      font-weight: bold;
-      background: linear-gradient(135deg, #007aff, #00c6ff);
-      border: none;
-      border-radius: 30px;
-      color: white;
-      box-shadow: 0 0 20px rgba(0, 122, 255, 0.5);
-    }
-  </style>
+  ::-webkit-scrollbar{width:0;height:0;}
+</style>
 </head>
 <body>
 
-  <div id="start-overlay">
-    <h1>AR Hand Geometry</h1>
-    <p style="margin-top: 10px; opacity: 0.7;">Interactive Visual Shader & Mesh FX</p>
-    <button id="start-btn">Start Camera</button>
-  </div>
+<div id="start-screen">
+  <div class="grid-bg"></div>
+  <h1>HAND FX <span>// ENGINE</span></h1>
+  <p>Real-time hand-tracked mesh, halftone &amp; feedback shaders. Rotation-stable landmark filtering. Camera stays on-device — nothing is uploaded.</p>
+  <button id="start-btn">ENABLE CAMERA</button>
+  <div id="load-status"></div>
+</div>
 
-  <div class="container">
-    <!-- Webkit-playsinline and playsinline are required for Safari on iOS -->
-    <video id="input-video" playsinline webkit-playsinline></video>
-    <canvas id="output-canvas"></canvas>
+<div id="error-screen">
+  <h2>CAMERA UNAVAILABLE</h2>
+  <p id="error-msg">Permission was denied or no camera was found. Check your browser's site settings and allow camera access, then retry.</p>
+  <button id="retry-btn">RETRY</button>
+</div>
 
-    <!-- Customization UI -->
-    <div class="controls" id="controls">
-      <div class="panel-header" onclick="togglePanel()">
-        <h2>⚡ Control FX</h2>
-        <button class="toggle-btn" id="toggle-lbl">Hide</button>
+<div id="stage">
+  <video id="webcam" playsinline webkit-playsinline muted></video>
+  <canvas id="main-canvas"></canvas>
+
+  <div id="hud">
+    <div class="hud-block">
+      <div class="hud-row">
+        <span id="rec-dot"></span>
+        <span>FPS <b id="fps-val">--</b></span>
+        <span>HANDS <b id="hand-val">0</b></span>
       </div>
-
-      <div class="panel-body">
-        <div class="control-group">
-          <label for="fx-mode">Effect Type:</label>
-          <select id="fx-mode">
-            <option value="deform">Warped Mesh & Shader</option>
-            <option value="halftone">Halftone Dots</option>
-            <option value="skeleton">Neon Skeleton</option>
-          </select>
-        </div>
-
-        <div class="control-group">
-          <label for="color-picker">Primary Color:</label>
-          <input type="color" id="color-picker" value="#00ffcc" />
-        </div>
-
-        <div class="control-group">
-          <label for="camera-select">Camera:</label>
-          <select id="camera-select">
-            <option value="user">Front Camera</option>
-            <option value="environment">Back Camera</option>
-          </select>
-        </div>
-
-        <div class="control-group">
-          <label for="invert-toggle">Invert Video BG:</label>
-          <input type="checkbox" id="invert-toggle" />
-        </div>
-
-        <div class="control-group">
-          <label for="dot-size">Dot/Line Scale:</label>
-          <input type="range" id="dot-size" min="2" max="20" value="8" />
-        </div>
-      </div>
+      <canvas id="scope"></canvas>
+    </div>
+    <div id="quick">
+      <button class="qbtn" id="btn-fullscreen" title="Fullscreen">⛶</button>
+      <button class="qbtn" id="btn-snapshot" title="Snapshot">📷</button>
+      <button class="qbtn" id="btn-record" title="Record">●</button>
     </div>
   </div>
 
-  <script>
-    const videoElement = document.getElementById('input-video');
-    const canvasElement = document.getElementById('output-canvas');
-    const canvasCtx = canvasElement.getContext('2d');
-    const startOverlay = document.getElementById('start-overlay');
-    const startBtn = document.getElementById('start-btn');
+  <div class="dock" id="dock">
+    <div class="dock-head" id="dock-head">
+      <div>
+        <div class="tag">🎛 CONTROL DOCK</div>
+        <div class="sub" id="dock-sub">preset: original</div>
+      </div>
+      <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+    </div>
 
-    // Controls
-    const fxModeSelect = document.getElementById('fx-mode');
-    const colorPicker = document.getElementById('color-picker');
-    const cameraSelect = document.getElementById('camera-select');
-    const invertToggle = document.getElementById('invert-toggle');
-    const dotSizeSlider = document.getElementById('dot-size');
+    <div class="dock-body">
+      <div class="grp-label">FX Preset</div>
+      <div class="preset-strip" id="preset-strip"></div>
 
-    let camera = null;
-    let currentFacingMode = 'user';
+      <div class="divider"></div>
 
-    // Resize canvas to window dimensions
-    function resizeCanvas() {
-      canvasElement.width = window.innerWidth;
-      canvasElement.height = window.innerHeight;
-    }
-    window.addEventListener('resize', resizeCanvas);
-    resizeCanvas();
+      <div class="grp-label">Look</div>
+      <div class="row">
+        <label>Dot / Accent Color</label>
+        <input type="color" id="dot-color" value="#ff0044" />
+      </div>
+      <div class="row">
+        <label>Invert / Posterize BG</label>
+        <label class="switch"><input type="checkbox" id="invert-cb" checked /><span class="knob"></span></label>
+      </div>
+      <div class="row">
+        <label>Feedback Trails</label>
+        <input type="range" id="feedback-slider" min="0" max="0.9" step="0.05" value="0.4" />
+      </div>
+      <div class="row">
+        <label>Mesh / Node Smoothing</label>
+        <input type="range" id="smooth-slider" min="0" max="0.95" step="0.05" value="0.55" />
+      </div>
 
-    // Toggle UI panel on mobile
-    function togglePanel() {
-      const panel = document.getElementById('controls');
-      const lbl = document.getElementById('toggle-lbl');
-      panel.classList.toggle('collapsed');
-      lbl.innerText = panel.classList.contains('collapsed') ? 'Show' : 'Hide';
-    }
+      <div class="divider"></div>
 
-    // Initialize MediaPipe Hands
-    const hands = new Hands({
-      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      <div class="grp-label">Camera</div>
+      <div class="row">
+        <label>Source</label>
+        <select id="cam-select">
+          <option value="user">Front Camera</option>
+          <option value="environment">Back Camera</option>
+        </select>
+      </div>
+      <div class="row">
+        <label>Show Telemetry HUD</label>
+        <label class="switch"><input type="checkbox" id="hud-cb" checked /><span class="knob"></span></label>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js";
+
+// ---------- DOM ----------
+const video = document.getElementById('webcam');
+const canvas = document.getElementById('main-canvas');
+const ctx = canvas.getContext('2d');
+const startScreen = document.getElementById('start-screen');
+const startBtn = document.getElementById('start-btn');
+const loadStatus = document.getElementById('load-status');
+const errorScreen = document.getElementById('error-screen');
+const errorMsg = document.getElementById('error-msg');
+const retryBtn = document.getElementById('retry-btn');
+
+const dock = document.getElementById('dock');
+const dockHead = document.getElementById('dock-head');
+const dockSub = document.getElementById('dock-sub');
+const presetStrip = document.getElementById('preset-strip');
+const dotColorPicker = document.getElementById('dot-color');
+const camSelect = document.getElementById('cam-select');
+const feedbackSlider = document.getElementById('feedback-slider');
+const smoothSlider = document.getElementById('smooth-slider');
+const invertCb = document.getElementById('invert-cb');
+const hudCb = document.getElementById('hud-cb');
+const hud = document.getElementById('hud');
+
+const fpsVal = document.getElementById('fps-val');
+const handVal = document.getElementById('hand-val');
+const scopeCanvas = document.getElementById('scope');
+const scopeCtx = scopeCanvas.getContext('2d');
+const recDot = document.getElementById('rec-dot');
+const btnFullscreen = document.getElementById('btn-fullscreen');
+const btnSnapshot = document.getElementById('btn-snapshot');
+const btnRecord = document.getElementById('btn-record');
+
+// ---------- Presets ----------
+const PRESETS = [
+  { id: 'original', label: 'MESH + POSTERIZE' },
+  { id: 'halftone', label: 'HALFTONE DOTS' },
+  { id: 'glitch',   label: 'FEEDBACK DATAMOSH' },
+  { id: 'skeleton', label: 'WIREFRAME SKELETON' },
+  { id: 'kaleido',  label: 'MIRROR KALEIDOSCOPE' },
+  { id: 'particles',label: 'PARTICLE SWARM' },
+];
+let currentPreset = 'original';
+
+presetStrip.innerHTML = PRESETS.map(p =>
+  `<div class="preset-chip${p.id===currentPreset?' active':''}" data-id="${p.id}">${p.label}</div>`
+).join('');
+presetStrip.addEventListener('click', (e) => {
+  const chip = e.target.closest('.preset-chip');
+  if (!chip) return;
+  currentPreset = chip.dataset.id;
+  [...presetStrip.children].forEach(c => c.classList.toggle('active', c === chip));
+  dockSub.textContent = `preset: ${currentPreset}`;
+});
+
+// ---------- Dock collapse ----------
+dockHead.addEventListener('click', () => dock.classList.toggle('collapsed'));
+
+// ---------- State ----------
+let handLandmarker;
+let lastVideoTime = -1;
+let currentFacingMode = "user";
+let offscreenCanvas = document.createElement('canvas');
+let offscreenCtx = offscreenCanvas.getContext('2d');
+let dpr = Math.min(window.devicePixelRatio || 1, 2);
+let particles = [];
+let scopeHistory = new Array(40).fill(0);
+let fpsHistory = [];
+let lastFrameT = performance.now();
+let mediaRecorder, recordedChunks = [], recStream;
+
+// ---------- HAND CONNECTIONS (for skeleton preset) ----------
+const HAND_CONNECTIONS = [
+  [0,1],[1,2],[2,3],[3,4],
+  [0,5],[5,6],[6,7],[7,8],
+  [5,9],[9,10],[10,11],[11,12],
+  [9,13],[13,14],[14,15],[15,16],
+  [13,17],[17,18],[18,19],[19,20],
+  [0,17]
+];
+
+// ---------- One-Euro-ish landmark smoothing (per-hand-slot, per-point) ----------
+// Reduces jitter and keeps geometry stable through rotation without adding lag on fast motion.
+const smoothState = [ {}, {} ]; // up to 2 hand slots
+function smoothPoint(slotIdx, ptIdx, x, y, z, alpha) {
+  const slot = smoothState[slotIdx];
+  const prev = slot[ptIdx];
+  if (!prev) {
+    slot[ptIdx] = { x, y, z };
+    return slot[ptIdx];
+  }
+  const smoothed = {
+    x: prev.x + (1 - alpha) * (x - prev.x),
+    y: prev.y + (1 - alpha) * (y - prev.y),
+    z: prev.z + (1 - alpha) * (z - prev.z),
+  };
+  slot[ptIdx] = smoothed;
+  return smoothed;
+}
+
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const w = window.innerWidth, h = window.innerHeight;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  canvas.style.width = w+'px'; canvas.style.height = h+'px';
+  offscreenCanvas.width = canvas.width; offscreenCanvas.height = canvas.height;
+  ctx.setTransform(dpr,0,0,dpr,0,0);
+  offscreenCtx.setTransform(dpr,0,0,dpr,0,0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+hudCb.addEventListener('change', () => hud.style.display = hudCb.checked ? 'flex' : 'none');
+
+// ---------- Model init ----------
+async function createHandLandmarker() {
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+  );
+  handLandmarker = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: {
+      modelAssetPath: `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task`,
+      delegate: "GPU"
+    },
+    runningMode: "VIDEO",
+    numHands: 2,
+    minHandDetectionConfidence: 0.4,
+    minHandPresenceConfidence: 0.4,
+    minTrackingConfidence: 0.4
+  });
+}
+
+async function startCamera(facingMode) {
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  currentFacingMode = facingMode;
+  const constraints = {
+    video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 60 } },
+    audio: false
+  };
+  const stream = await navigator.mediaDevices.getUserMedia(constraints);
+  video.srcObject = stream;
+  await video.play();
+  requestAnimationFrame(renderLoop);
+}
+
+camSelect.addEventListener('change', (e) => startCamera(e.target.value).catch(showError));
+
+// ---------- FX helpers ----------
+function drawScope() {
+  const w = scopeCanvas.width = 70, h = scopeCanvas.height = 18;
+  scopeCtx.clearRect(0,0,w,h);
+  scopeCtx.strokeStyle = '#00ffcc';
+  scopeCtx.lineWidth = 1.2;
+  scopeCtx.beginPath();
+  scopeHistory.forEach((v, i) => {
+    const x = (i/(scopeHistory.length-1)) * w;
+    const y = h - v*h;
+    i===0 ? scopeCtx.moveTo(x,y) : scopeCtx.lineTo(x,y);
+  });
+  scopeCtx.stroke();
+}
+
+function spawnParticles(x, y, color, n=3) {
+  for (let i=0;i<n;i++){
+    particles.push({
+      x, y,
+      vx:(Math.random()-0.5)*4, vy:(Math.random()-0.5)*4,
+      life:1, color
     });
+  }
+  if (particles.length > 400) particles.splice(0, particles.length-400);
+}
 
-    hands.setOptions({
-      maxNumHands: 2,
-      modelComplexity: 1,
-      minDetectionConfidence: 0.6,
-      minTrackingConfidence: 0.6
+// ---------- Render loop ----------
+function renderLoop() {
+  const now = performance.now();
+  const dt = now - lastFrameT; lastFrameT = now;
+  fpsHistory.push(1000/dt); if (fpsHistory.length>30) fpsHistory.shift();
+  const fps = Math.round(fpsHistory.reduce((a,b)=>a+b,0)/fpsHistory.length);
+  fpsVal.textContent = isFinite(fps) ? fps : '--';
+
+  const w = window.innerWidth, h = window.innerHeight;
+
+  let results = null;
+  if (video.currentTime !== lastVideoTime && handLandmarker) {
+    lastVideoTime = video.currentTime;
+    results = handLandmarker.detectForVideo(video, now);
+  }
+
+  const handCount = results?.landmarks?.length || 0;
+  handVal.textContent = handCount;
+  scopeHistory.push(Math.min(1, handCount/2)); scopeHistory.shift();
+  drawScope();
+
+  // --- Feedback trails ---
+  const trailAlpha = 1 - parseFloat(feedbackSlider.value);
+  ctx.fillStyle = `rgba(0,0,0,${trailAlpha})`;
+  ctx.fillRect(0,0,w,h);
+
+  // --- Background pass ---
+  offscreenCtx.save();
+  offscreenCtx.clearRect(0,0,w,h);
+  if (currentFacingMode === 'user') { offscreenCtx.translate(w,0); offscreenCtx.scale(-1,1); }
+  if (invertCb.checked) {
+    offscreenCtx.filter = 'invert(100%) hue-rotate(190deg) contrast(200%) brightness(120%)';
+  } else {
+    offscreenCtx.filter = 'none';
+  }
+  offscreenCtx.drawImage(video, 0, 0, w, h);
+  offscreenCtx.restore();
+
+  ctx.save();
+  ctx.globalAlpha = trailAlpha < 1 ? 0.8 : 1.0;
+  ctx.drawImage(offscreenCanvas, 0, 0, w, h);
+  ctx.restore();
+
+  // --- Kaleidoscope pre-pass (mirrors the background into quadrants) ---
+  if (currentPreset === 'kaleido') {
+    ctx.save();
+    const cx = w/2, cy = h/2;
+    [ [1,1],[-1,1],[1,-1],[-1,-1] ].forEach(([sx,sy], i) => {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(sx*0.5, sy*0.5);
+      ctx.translate(-cx, -cy);
+      ctx.globalAlpha = 0.55;
+      ctx.drawImage(offscreenCanvas, 0, 0, w, h);
+      ctx.restore();
     });
+    ctx.restore();
+  }
 
-    hands.onResults(onResults);
+  // --- Hand-driven FX ---
+  if (results && results.landmarks && results.landmarks.length > 0) {
+    const dotColor = dotColorPicker.value;
+    const smoothAlpha = parseFloat(smoothSlider.value);
 
-    // Frame rendering routine
-    function onResults(results) {
-      const w = canvasElement.width;
-      const h = canvasElement.height;
+    const allHandsPoints = results.landmarks.map((hand, slotIdx) => {
+      return hand.map((pt, idx) => {
+        const rawX = currentFacingMode === 'user' ? (1 - pt.x) * w : pt.x * w;
+        const rawY = pt.y * h;
+        return smoothPoint(slotIdx, idx, rawX, rawY, pt.z, smoothAlpha);
+      });
+    });
+    // clear smoothing memory for absent hand slot to avoid stale snapping back
+    if (allHandsPoints.length < 2) smoothState[1] = {};
 
-      canvasCtx.save();
-      canvasCtx.clearRect(0, 0, w, h);
-
-      // Draw background camera feed
-      if (invertToggle.checked) {
-        canvasCtx.filter = 'invert(100%) hue-rotate(180deg) contrast(150%)';
+    // MESH presets
+    if (currentPreset === 'original' || currentPreset === 'glitch') {
+      if (allHandsPoints.length >= 2) {
+        const h1 = allHandsPoints[0], h2 = allHandsPoints[1];
+        ctx.beginPath();
+        ctx.moveTo(h1[8].x, h1[8].y);
+        ctx.lineTo(h1[4].x, h1[4].y);
+        ctx.lineTo(h2[20].x, h2[20].y);
+        ctx.lineTo(h2[4].x, h2[4].y);
+        ctx.lineTo(h2[8].x, h2[8].y);
+        ctx.lineTo(h1[20].x, h1[20].y);
+        ctx.closePath();
+        ctx.save();
+        ctx.clip();
+        ctx.filter = currentPreset==='glitch'
+          ? `contrast(280%) saturate(400%) hue-rotate(${(now/15)%360}deg)`
+          : 'contrast(250%) saturate(300%) hue-rotate(90deg)';
+        ctx.drawImage(offscreenCanvas, 0, 0, w, h);
+        ctx.restore();
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+      } else if (allHandsPoints.length === 1) {
+        const h1 = allHandsPoints[0];
+        ctx.beginPath();
+        ctx.moveTo(h1[4].x, h1[4].y);
+        ctx.lineTo(h1[8].x, h1[8].y);
+        ctx.lineTo(h1[12].x, h1[12].y);
+        ctx.lineTo(h1[20].x, h1[20].y);
+        ctx.lineTo(h1[0].x, h1[0].y);
+        ctx.closePath();
+        ctx.save();
+        ctx.clip();
+        ctx.filter = 'invert(100%) contrast(300%)';
+        ctx.drawImage(offscreenCanvas, 0, 0, w, h);
+        ctx.restore();
+        ctx.strokeStyle = '#00ffcc';
+        ctx.lineWidth = 2;
+        ctx.stroke();
       }
-      
-      // Mirror front camera horizontally
-      if (currentFacingMode === 'user') {
-        canvasCtx.translate(w, 0);
-        canvasCtx.scale(-1, 1);
-      }
+    }
 
-      canvasCtx.drawImage(results.image, 0, 0, w, h);
-      canvasCtx.filter = 'none'; // Reset filter for overlays
-
-      const fxMode = fxModeSelect.value;
-      const primaryColor = colorPicker.value;
-      const scaleVal = parseInt(dotSizeSlider.value);
-
-      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-        
-        // Collect key points (Index Tips & Thumbs) from detected hands
-        let pts = [];
-        results.multiHandLandmarks.forEach((landmarks) => {
-          landmarks.forEach((pt) => {
-            pts.push({ x: pt.x * w, y: pt.y * h });
-          });
+    // SKELETON preset — clean node/edge graph, TD-network style
+    if (currentPreset === 'skeleton') {
+      allHandsPoints.forEach(hand => {
+        ctx.strokeStyle = dotColor;
+        ctx.lineWidth = 2;
+        HAND_CONNECTIONS.forEach(([a,b]) => {
+          ctx.beginPath();
+          ctx.moveTo(hand[a].x, hand[a].y);
+          ctx.lineTo(hand[b].x, hand[b].y);
+          ctx.stroke();
         });
+        hand.forEach((pt,idx) => {
+          ctx.fillStyle = idx===0 ? '#ffffff' : dotColor;
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, idx===0?5:3, 0, 2*Math.PI);
+          ctx.fill();
+        });
+      });
+    }
 
-        // Mode 1: Dynamic Geometric Mesh Overlay
-        if (fxMode === 'deform') {
-          canvasCtx.fillStyle = primaryColor + '66'; // semi-transparent
-          canvasCtx.strokeStyle = primaryColor;
-          canvasCtx.lineWidth = Math.max(1, scaleVal / 3);
+    // PARTICLE preset — emits from fingertips
+    if (currentPreset === 'particles') {
+      allHandsPoints.forEach(hand => {
+        [4,8,12,16,20].forEach(idx => spawnParticles(hand[idx].x, hand[idx].y, dotColor, 2));
+      });
+    }
 
-          if (pts.length >= 8) {
-            // Draw dynamic 3D-like polygon connecting fingertips between hands
-            canvasCtx.beginPath();
-            canvasCtx.moveTo(pts[8].x, pts[8].y);   // Left Index
-            canvasCtx.lineTo(pts[4].x, pts[4].y);   // Left Thumb
-            if (pts[25]) canvasCtx.lineTo(pts[25].x, pts[25].y); // Right Thumb
-            if (pts[29]) canvasCtx.lineTo(pts[29].x, pts[29].y); // Right Index
-            canvasCtx.closePath();
-            canvasCtx.fill();
-            canvasCtx.stroke();
-          }
-
-          // Halftone dots at hand joint nodes
-          pts.forEach((p) => {
-            canvasCtx.beginPath();
-            canvasCtx.arc(p.x, p.y, scaleVal, 0, 2 * Math.PI);
-            canvasCtx.fillStyle = primaryColor;
-            canvasCtx.fill();
-          });
-        }
-
-        // Mode 2: Halftone Dot Matrix over Hand Area
-        else if (fxMode === 'halftone') {
-          pts.forEach((p) => {
-            for (let dx = -30; dx <= 30; dx += scaleVal * 1.5) {
-              for (let dy = -30; dy <= 30; dy += scaleVal * 1.5) {
-                canvasCtx.beginPath();
-                canvasCtx.arc(p.x + dx, p.y + dy, scaleVal / 2, 0, 2 * Math.PI);
-                canvasCtx.fillStyle = primaryColor;
-                canvasCtx.fill();
+    // Halftone dot overlay — shared across most presets for texture continuity
+    if (['halftone','original','kaleido','glitch'].includes(currentPreset)) {
+      allHandsPoints.forEach(hand => {
+        hand.forEach((pt, idx) => {
+          if ([0,4,8,12,16,20].includes(idx)) {
+            const dotRadius = Math.max(3, 12 + pt.z*20);
+            ctx.fillStyle = dotColor;
+            ctx.beginPath();
+            ctx.arc(pt.x, pt.y, dotRadius, 0, 2*Math.PI);
+            ctx.fill();
+            if (currentPreset === 'halftone' || currentPreset === 'original') {
+              for (let rx=-20; rx<=20; rx+=8) {
+                for (let ry=-20; ry<=20; ry+=8) {
+                  ctx.fillRect(pt.x+rx, pt.y+ry, 2, 2);
+                }
               }
             }
-          });
-        }
-
-        // Mode 3: Neon Skeleton
-        else if (fxMode === 'skeleton') {
-          results.multiHandLandmarks.forEach((landmarks) => {
-            drawSkeleton(landmarks, w, h, primaryColor, scaleVal);
-          });
-        }
-      }
-
-      canvasCtx.restore();
-    }
-
-    // Helper to draw neon hand wireframe
-    function drawSkeleton(landmarks, w, h, color, lineWidth) {
-      const connections = [
-        [0,1],[1,2],[2,3],[3,4],        // Thumb
-        [0,5],[5,6],[6,7],[7,8],        // Index
-        [5,9],[9,10],[10,11],[11,12],   // Middle
-        [9,13],[13,14],[14,15],[15,16], // Ring
-        [13,17],[17,18],[18,19],[19,20],[0,17] // Pinky & Palm
-      ];
-
-      canvasCtx.strokeStyle = color;
-      canvasCtx.lineWidth = lineWidth / 2;
-      canvasCtx.shadowColor = color;
-      canvasCtx.shadowBlur = 10;
-
-      connections.forEach(([i, j]) => {
-        const p1 = landmarks[i];
-        const p2 = landmarks[j];
-        canvasCtx.beginPath();
-        canvasCtx.moveTo(p1.x * w, p1.y * h);
-        canvasCtx.lineTo(p2.x * w, p2.y * h);
-        canvasCtx.stroke();
+          }
+        });
       });
-
-      canvasCtx.shadowBlur = 0; // Reset glow
     }
+  } else {
+    // no hands: let smoothing memory reset so a new hand doesn't ease in from (0,0)
+    smoothState[0] = {}; smoothState[1] = {};
+  }
 
-    // Start video camera stream
-    async function initCamera(facingMode) {
-      if (camera) {
-        camera.stop();
-      }
-      currentFacingMode = facingMode;
-
-      camera = new Camera(videoElement, {
-        onFrame: async () => {
-          await hands.send({ image: videoElement });
-        },
-        facingMode: facingMode,
-        width: 1280,
-        height: 720
-      });
-      await camera.start();
-    }
-
-    // Start button handler (Required for camera permissions on iOS)
-    startBtn.addEventListener('click', async () => {
-      startOverlay.style.display = 'none';
-      await initCamera(currentFacingMode);
+  // --- particle update/draw (independent of hand presence so trails decay naturally) ---
+  if (particles.length) {
+    ctx.save();
+    particles.forEach(p => {
+      p.x += p.vx; p.y += p.vy; p.life -= 0.02;
+      ctx.globalAlpha = Math.max(p.life, 0);
+      ctx.fillStyle = p.color;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4*p.life, 0, 2*Math.PI);
+      ctx.fill();
     });
+    ctx.restore();
+    particles = particles.filter(p => p.life > 0);
+  }
 
-    // Camera Switch Listener
-    cameraSelect.addEventListener('change', (e) => {
-      initCamera(e.target.value);
-    });
-  </script>
+  requestAnimationFrame(renderLoop);
+}
+
+// ---------- Errors ----------
+function showError(err) {
+  console.error(err);
+  startScreen.style.display = 'none';
+  errorScreen.style.display = 'flex';
+  if (err && err.name === 'NotAllowedError') {
+    errorMsg.textContent = 'Camera permission was denied. Allow camera access in your browser/site settings, then retry.';
+  } else if (err && err.name === 'NotFoundError') {
+    errorMsg.textContent = 'No camera was found on this device.';
+  } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+    errorMsg.textContent = 'Camera access requires HTTPS. Open this page over https:// or from localhost.';
+  }
+}
+retryBtn.addEventListener('click', () => {
+  errorScreen.style.display = 'none';
+  startScreen.style.display = 'flex';
+});
+
+// ---------- Start flow ----------
+startBtn.addEventListener('click', async () => {
+  try {
+    loadStatus.textContent = 'loading model…';
+    startBtn.disabled = true;
+    await createHandLandmarker();
+    loadStatus.textContent = 'requesting camera…';
+    await startCamera(currentFacingMode);
+    startScreen.style.display = 'none';
+  } catch (err) {
+    showError(err);
+  } finally {
+    startBtn.disabled = false;
+  }
+});
+
+// ---------- Fullscreen ----------
+btnFullscreen.addEventListener('click', () => {
+  if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+  else document.exitFullscreen?.();
+});
+
+// ---------- Snapshot ----------
+btnSnapshot.addEventListener('click', () => {
+  canvas.toBlob(blob => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `handfx-${Date.now()}.png`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }, 'image/png');
+});
+
+// ---------- Record ----------
+btnRecord.addEventListener('click', () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+  recStream = canvas.captureStream(30);
+  recordedChunks = [];
+  const mime = MediaRecorder.isTypeSupported('video/mp4') ? 'video/mp4' : 'video/webm';
+  mediaRecorder = new MediaRecorder(recStream, { mimeType: mime });
+  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    recDot.classList.remove('on');
+    btnRecord.style.color = '';
+    const blob = new Blob(recordedChunks, { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `handfx-${Date.now()}.${mime.includes('mp4')?'mp4':'webm'}`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  mediaRecorder.start();
+  recDot.classList.add('on');
+  btnRecord.style.color = 'var(--accent2)';
+});
+</script>
 </body>
 </html>
