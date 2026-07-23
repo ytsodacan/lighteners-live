@@ -107,6 +107,7 @@
     background-size:34px 34px;mask-image:radial-gradient(circle at 50% 40%, #000 0%, transparent 70%);
   }
   #start-btn{
+    position:relative;z-index:1;pointer-events:auto;
     margin-top:28px;padding:16px 44px;font-size:14px;font-weight:700;letter-spacing:1.5px;
     background:var(--accent);color:#000;border:none;border-radius:40px;box-shadow:0 0 30px rgba(0,255,204,0.35);
     font-family:inherit;
@@ -395,7 +396,7 @@ const MEDIAPIPE_VERSION = "0.10.35";
 
 async function createHandLandmarker() {
   const { HandLandmarker, FilesetResolver } = await import(
-    `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/vision_bundle.js`
+    `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/vision_bundle.mjs`
   );
   const vision = await FilesetResolver.forVisionTasks(
     `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`
