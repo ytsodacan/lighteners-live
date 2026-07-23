@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <!-- Crucial for mobile responsiveness on iOS -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>AR Hand Geometry & FX</title>
+
+  <!-- MediaPipe Dependencies via CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #000;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    .container {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+    }
+
+    /* Video element hidden behind canvas, plays inline on iOS */
+    video {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: none;
+    }
+
+    canvas {
+      position: absolute;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* Glassmorphism Control Panel for iOS */
+    .controls {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 90%;
+      max-width: 420px;
+      background: rgba(20, 20, 20, 0.75);
+      backdrop-filter: blur(15px);
+      -webkit-backdrop-filter: blur(15px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-radius: 20px;
+      padding: 16px;
+      color: #fff;
+      z-index: 10;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+      transition: all 0.3s ease;
+    }
+
+    .controls.collapsed .panel-body {
+      display: none;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      cursor: pointer;
+    }
+
+    .panel-header h2 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: 0.5px;
+    }
+
+    .toggle-btn {
+      background: rgba(255, 255, 255, 0.2);
+      border: none;
+      color: white;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+    }
+
+    .panel-body {
+      margin-top: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .control-group {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 13px;
+    }
+
+    select, input[type="color"], input[type="range"] {
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #fff;
+      padding: 6px 10px;
+      border-radius: 8px;
+      outline: none;
+    }
+
+    select option {
+      background: #222;
+      color: #fff;
+    }
+
+    input[type="range"] {
+      width: 110px;
+    }
+
+    /* Start Button Overlay */
+    #start-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: #000;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: white;
+      text-align: center;
+      padding: 20px;
+    }
+
+    #start-btn {
+      margin-top: 20px;
+      padding: 16px 36px;
+      font-size: 18px;
+      font-weight: bold;
+      background: linear-gradient(135deg, #007aff, #00c6ff);
+      border: none;
+      border-radius: 30px;
+      color: white;
+      box-shadow: 0 0 20px rgba(0, 122, 255, 0.5);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="start-overlay">
+    <h1>AR Hand Geometry</h1>
+    <p style="margin-top: 10px; opacity: 0.7;">Interactive Visual Shader & Mesh FX</p>
+    <button id="start-btn">Start Camera</button>
+  </div>
+
+  <div class="container">
+    <!-- Webkit-playsinline and playsinline are required for Safari on iOS -->
+    <video id="input-video" playsinline webkit-playsinline></video>
+    <canvas id="output-canvas"></canvas>
+
+    <!-- Customization UI -->
+    <div class="controls" id="controls">
+      <div class="panel-header" onclick="togglePanel()">
+        <h2>⚡ Control FX</h2>
+        <button class="toggle-btn" id="toggle-lbl">Hide</button>
+      </div>
+
+      <div class="panel-body">
+        <div class="control-group">
+          <label for="fx-mode">Effect Type:</label>
+          <select id="fx-mode">
+            <option value="deform">Warped Mesh & Shader</option>
+            <option value="halftone">Halftone Dots</option>
+            <option value="skeleton">Neon Skeleton</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label for="color-picker">Primary Color:</label>
+          <input type="color" id="color-picker" value="#00ffcc" />
+        </div>
+
+        <div class="control-group">
+          <label for="camera-select">Camera:</label>
+          <select id="camera-select">
+            <option value="user">Front Camera</option>
+            <option value="environment">Back Camera</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label for="invert-toggle">Invert Video BG:</label>
+          <input type="checkbox" id="invert-toggle" />
+        </div>
+
+        <div class="control-group">
+          <label for="dot-size">Dot/Line Scale:</label>
+          <input type="range" id="dot-size" min="2" max="20" value="8" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const videoElement = document.getElementById('input-video');
+    const canvasElement = document.getElementById('output-canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const startOverlay = document.getElementById('start-overlay');
+    const startBtn = document.getElementById('start-btn');
+
+    // Controls
+    const fxModeSelect = document.getElementById('fx-mode');
+    const colorPicker = document.getElementById('color-picker');
+    const cameraSelect = document.getElementById('camera-select');
+    const invertToggle = document.getElementById('invert-toggle');
+    const dotSizeSlider = document.getElementById('dot-size');
+
+    let camera = null;
+    let currentFacingMode = 'user';
+
+    // Resize canvas to window dimensions
+    function resizeCanvas() {
+      canvasElement.width = window.innerWidth;
+      canvasElement.height = window.innerHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // Toggle UI panel on mobile
+    function togglePanel() {
+      const panel = document.getElementById('controls');
+      const lbl = document.getElementById('toggle-lbl');
+      panel.classList.toggle('collapsed');
+      lbl.innerText = panel.classList.contains('collapsed') ? 'Show' : 'Hide';
+    }
+
+    // Initialize MediaPipe Hands
+    const hands = new Hands({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+    });
+
+    hands.setOptions({
+      maxNumHands: 2,
+      modelComplexity: 1,
+      minDetectionConfidence: 0.6,
+      minTrackingConfidence: 0.6
+    });
+
+    hands.onResults(onResults);
+
+    // Frame rendering routine
+    function onResults(results) {
+      const w = canvasElement.width;
+      const h = canvasElement.height;
+
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, w, h);
+
+      // Draw background camera feed
+      if (invertToggle.checked) {
+        canvasCtx.filter = 'invert(100%) hue-rotate(180deg) contrast(150%)';
+      }
+      
+      // Mirror front camera horizontally
+      if (currentFacingMode === 'user') {
+        canvasCtx.translate(w, 0);
+        canvasCtx.scale(-1, 1);
+      }
+
+      canvasCtx.drawImage(results.image, 0, 0, w, h);
+      canvasCtx.filter = 'none'; // Reset filter for overlays
+
+      const fxMode = fxModeSelect.value;
+      const primaryColor = colorPicker.value;
+      const scaleVal = parseInt(dotSizeSlider.value);
+
+      if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        
+        // Collect key points (Index Tips & Thumbs) from detected hands
+        let pts = [];
+        results.multiHandLandmarks.forEach((landmarks) => {
+          landmarks.forEach((pt) => {
+            pts.push({ x: pt.x * w, y: pt.y * h });
+          });
+        });
+
+        // Mode 1: Dynamic Geometric Mesh Overlay
+        if (fxMode === 'deform') {
+          canvasCtx.fillStyle = primaryColor + '66'; // semi-transparent
+          canvasCtx.strokeStyle = primaryColor;
+          canvasCtx.lineWidth = Math.max(1, scaleVal / 3);
+
+          if (pts.length >= 8) {
+            // Draw dynamic 3D-like polygon connecting fingertips between hands
+            canvasCtx.beginPath();
+            canvasCtx.moveTo(pts[8].x, pts[8].y);   // Left Index
+            canvasCtx.lineTo(pts[4].x, pts[4].y);   // Left Thumb
+            if (pts[25]) canvasCtx.lineTo(pts[25].x, pts[25].y); // Right Thumb
+            if (pts[29]) canvasCtx.lineTo(pts[29].x, pts[29].y); // Right Index
+            canvasCtx.closePath();
+            canvasCtx.fill();
+            canvasCtx.stroke();
+          }
+
+          // Halftone dots at hand joint nodes
+          pts.forEach((p) => {
+            canvasCtx.beginPath();
+            canvasCtx.arc(p.x, p.y, scaleVal, 0, 2 * Math.PI);
+            canvasCtx.fillStyle = primaryColor;
+            canvasCtx.fill();
+          });
+        }
+
+        // Mode 2: Halftone Dot Matrix over Hand Area
+        else if (fxMode === 'halftone') {
+          pts.forEach((p) => {
+            for (let dx = -30; dx <= 30; dx += scaleVal * 1.5) {
+              for (let dy = -30; dy <= 30; dy += scaleVal * 1.5) {
+                canvasCtx.beginPath();
+                canvasCtx.arc(p.x + dx, p.y + dy, scaleVal / 2, 0, 2 * Math.PI);
+                canvasCtx.fillStyle = primaryColor;
+                canvasCtx.fill();
+              }
+            }
+          });
+        }
+
+        // Mode 3: Neon Skeleton
+        else if (fxMode === 'skeleton') {
+          results.multiHandLandmarks.forEach((landmarks) => {
+            drawSkeleton(landmarks, w, h, primaryColor, scaleVal);
+          });
+        }
+      }
+
+      canvasCtx.restore();
+    }
+
+    // Helper to draw neon hand wireframe
+    function drawSkeleton(landmarks, w, h, color, lineWidth) {
+      const connections = [
+        [0,1],[1,2],[2,3],[3,4],        // Thumb
+        [0,5],[5,6],[6,7],[7,8],        // Index
+        [5,9],[9,10],[10,11],[11,12],   // Middle
+        [9,13],[13,14],[14,15],[15,16], // Ring
+        [13,17],[17,18],[18,19],[19,20],[0,17] // Pinky & Palm
+      ];
+
+      canvasCtx.strokeStyle = color;
+      canvasCtx.lineWidth = lineWidth / 2;
+      canvasCtx.shadowColor = color;
+      canvasCtx.shadowBlur = 10;
+
+      connections.forEach(([i, j]) => {
+        const p1 = landmarks[i];
+        const p2 = landmarks[j];
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(p1.x * w, p1.y * h);
+        canvasCtx.lineTo(p2.x * w, p2.y * h);
+        canvasCtx.stroke();
+      });
+
+      canvasCtx.shadowBlur = 0; // Reset glow
+    }
+
+    // Start video camera stream
+    async function initCamera(facingMode) {
+      if (camera) {
+        camera.stop();
+      }
+      currentFacingMode = facingMode;
+
+      camera = new Camera(videoElement, {
+        onFrame: async () => {
+          await hands.send({ image: videoElement });
+        },
+        facingMode: facingMode,
+        width: 1280,
+        height: 720
+      });
+      await camera.start();
+    }
+
+    // Start button handler (Required for camera permissions on iOS)
+    startBtn.addEventListener('click', async () => {
+      startOverlay.style.display = 'none';
+      await initCamera(currentFacingMode);
+    });
+
+    // Camera Switch Listener
+    cameraSelect.addEventListener('change', (e) => {
+      initCamera(e.target.value);
+    });
+  </script>
+</body>
+</html>
