@@ -5,8 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <title>TD // HAND FX ENGINE</title>
 
-<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm/vision_bundle.js" crossorigin="anonymous"></script>
-
 <style>
   @font-face {
     font-family: 'JBM';
@@ -104,7 +102,7 @@
   #start-screen h1{font-size:22px;letter-spacing:3px;color:var(--accent);}
   #start-screen h1 span{color:var(--dim);}
   #start-screen p{opacity:0.55;margin-top:10px;font-size:12.5px;max-width:280px;line-height:1.5;}
-  .grid-bg{position:absolute;inset:0;opacity:0.15;
+  .grid-bg{position:absolute;inset:0;opacity:0.15;pointer-events:none;
     background-image:linear-gradient(var(--accent) 1px, transparent 1px), linear-gradient(90deg, var(--accent) 1px, transparent 1px);
     background-size:34px 34px;mask-image:radial-gradient(circle at 50% 40%, #000 0%, transparent 70%);
   }
@@ -210,31 +208,120 @@
   </div>
 </div>
 
+<script>
+// ---------------------------------------------------------------
+// PLAIN SCRIPT — no imports, no network calls. Runs immediately so
+// the start button, preset chips, and dock always respond even if
+// the MediaPipe CDN is slow, blocked, or fails to load.
+// ---------------------------------------------------------------
+(function () {
+  const dock = document.getElementById('dock');
+  const dockHead = document.getElementById('dock-head');
+  const dockSub = document.getElementById('dock-sub');
+  const presetStrip = document.getElementById('preset-strip');
+  const hudCb = document.getElementById('hud-cb');
+  const hud = document.getElementById('hud');
+
+  window.__PRESETS = [
+    { id: 'original', label: 'MESH + POSTERIZE' },
+    { id: 'halftone', label: 'HALFTONE DOTS' },
+    { id: 'glitch',   label: 'FEEDBACK DATAMOSH' },
+    { id: 'skeleton', label: 'WIREFRAME SKELETON' },
+    { id: 'kaleido',  label: 'MIRROR KALEIDOSCOPE' },
+    { id: 'particles',label: 'PARTICLE SWARM' },
+  ];
+  window.__currentPreset = 'original';
+
+  presetStrip.innerHTML = window.__PRESETS.map(p =>
+    `<div class="preset-chip${p.id===window.__currentPreset?' active':''}" data-id="${p.id}">${p.label}</div>`
+  ).join('');
+  presetStrip.addEventListener('click', (e) => {
+    const chip = e.target.closest('.preset-chip');
+    if (!chip) return;
+    window.__currentPreset = chip.dataset.id;
+    [...presetStrip.children].forEach(c => c.classList.toggle('active', c === chip));
+    dockSub.textContent = `preset: ${window.__currentPreset}`;
+  });
+
+  dockHead.addEventListener('click', () => dock.classList.toggle('collapsed'));
+  hudCb.addEventListener('change', () => hud.style.display = hudCb.checked ? 'flex' : 'none');
+
+  // Start button wiring lives here too, so it is guaranteed to respond.
+  // The actual (network-dependent) camera/model startup is delegated
+  // to window.__startEngine, defined by the module script below.
+  const startBtn = document.getElementById('start-btn');
+  const loadStatus = document.getElementById('load-status');
+  startBtn.addEventListener('click', async () => {
+    startBtn.disabled = true;
+    loadStatus.textContent = 'loading model…';
+    if (typeof window.__startEngine !== 'function') {
+      // Module script hasn't finished loading yet — wait briefly and retry once.
+      loadStatus.textContent = 'still preparing engine…';
+      await new Promise(r => setTimeout(r, 1500));
+    }
+    if (typeof window.__startEngine !== 'function') {
+      loadStatus.textContent = '';
+      window.__showError({ message: 'Engine failed to load. Check your internet connection and reload the page.' });
+      startBtn.disabled = false;
+      return;
+    }
+    try {
+      await window.__startEngine();
+      document.getElementById('start-screen').style.display = 'none';
+    } catch (err) {
+      window.__showError(err);
+    } finally {
+      startBtn.disabled = false;
+    }
+  });
+
+  window.__showError = function (err) {
+    console.error(err);
+    document.getElementById('start-screen').style.display = 'none';
+    const errorScreen = document.getElementById('error-screen');
+    const errorMsg = document.getElementById('error-msg');
+    errorScreen.style.display = 'flex';
+    if (err && err.name === 'NotAllowedError') {
+      errorMsg.textContent = 'Camera permission was denied. Allow camera access in your browser/site settings, then retry.';
+    } else if (err && err.name === 'NotFoundError') {
+      errorMsg.textContent = 'No camera was found on this device.';
+    } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
+      errorMsg.textContent = 'Camera access requires HTTPS. Open this page over https:// or from localhost.';
+    } else if (err && err.message) {
+      errorMsg.textContent = err.message;
+    }
+  };
+  document.getElementById('retry-btn').addEventListener('click', () => {
+    document.getElementById('error-screen').style.display = 'none';
+    document.getElementById('start-screen').style.display = 'flex';
+  });
+
+  // Watchdog: if the module script hasn't marked itself ready within 8s
+  // (e.g. CDN blocked), tell the user instead of leaving them guessing.
+  setTimeout(() => {
+    if (!window.__engineReady) {
+      loadStatus.textContent = 'taking longer than expected — check your connection';
+    }
+  }, 8000);
+})();
+</script>
+
 <script type="module">
-import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/vision_bundle.js";
+// ---------------------------------------------------------------
+// MODULE SCRIPT — handles the network-dependent MediaPipe import,
+// camera, and rendering. Imported lazily so a slow/blocked CDN
+// never prevents the page's core UI from responding.
+// ---------------------------------------------------------------
 
 // ---------- DOM ----------
 const video = document.getElementById('webcam');
 const canvas = document.getElementById('main-canvas');
 const ctx = canvas.getContext('2d');
-const startScreen = document.getElementById('start-screen');
-const startBtn = document.getElementById('start-btn');
-const loadStatus = document.getElementById('load-status');
-const errorScreen = document.getElementById('error-screen');
-const errorMsg = document.getElementById('error-msg');
-const retryBtn = document.getElementById('retry-btn');
-
-const dock = document.getElementById('dock');
-const dockHead = document.getElementById('dock-head');
-const dockSub = document.getElementById('dock-sub');
-const presetStrip = document.getElementById('preset-strip');
 const dotColorPicker = document.getElementById('dot-color');
 const camSelect = document.getElementById('cam-select');
 const feedbackSlider = document.getElementById('feedback-slider');
 const smoothSlider = document.getElementById('smooth-slider');
 const invertCb = document.getElementById('invert-cb');
-const hudCb = document.getElementById('hud-cb');
-const hud = document.getElementById('hud');
 
 const fpsVal = document.getElementById('fps-val');
 const handVal = document.getElementById('hand-val');
@@ -244,31 +331,6 @@ const recDot = document.getElementById('rec-dot');
 const btnFullscreen = document.getElementById('btn-fullscreen');
 const btnSnapshot = document.getElementById('btn-snapshot');
 const btnRecord = document.getElementById('btn-record');
-
-// ---------- Presets ----------
-const PRESETS = [
-  { id: 'original', label: 'MESH + POSTERIZE' },
-  { id: 'halftone', label: 'HALFTONE DOTS' },
-  { id: 'glitch',   label: 'FEEDBACK DATAMOSH' },
-  { id: 'skeleton', label: 'WIREFRAME SKELETON' },
-  { id: 'kaleido',  label: 'MIRROR KALEIDOSCOPE' },
-  { id: 'particles',label: 'PARTICLE SWARM' },
-];
-let currentPreset = 'original';
-
-presetStrip.innerHTML = PRESETS.map(p =>
-  `<div class="preset-chip${p.id===currentPreset?' active':''}" data-id="${p.id}">${p.label}</div>`
-).join('');
-presetStrip.addEventListener('click', (e) => {
-  const chip = e.target.closest('.preset-chip');
-  if (!chip) return;
-  currentPreset = chip.dataset.id;
-  [...presetStrip.children].forEach(c => c.classList.toggle('active', c === chip));
-  dockSub.textContent = `preset: ${currentPreset}`;
-});
-
-// ---------- Dock collapse ----------
-dockHead.addEventListener('click', () => dock.classList.toggle('collapsed'));
 
 // ---------- State ----------
 let handLandmarker;
@@ -324,12 +386,19 @@ function resize() {
 window.addEventListener('resize', resize);
 resize();
 
-hudCb.addEventListener('change', () => hud.style.display = hudCb.checked ? 'flex' : 'none');
-
 // ---------- Model init ----------
+// Pinned to a specific, known-good release rather than "@latest" — a
+// moving tag can silently break the import, and a redirect through
+// "@latest" is exactly the kind of request some mobile browsers/networks
+// stall on, which is what causes an infinite "loading" state.
+const MEDIAPIPE_VERSION = "0.10.35";
+
 async function createHandLandmarker() {
+  const { HandLandmarker, FilesetResolver } = await import(
+    `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/vision_bundle.js`
+  );
   const vision = await FilesetResolver.forVisionTasks(
-    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm"
+    `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MEDIAPIPE_VERSION}/wasm`
   );
   handLandmarker = await HandLandmarker.createFromOptions(vision, {
     baseOptions: {
@@ -357,7 +426,16 @@ async function startCamera(facingMode) {
   requestAnimationFrame(renderLoop);
 }
 
-camSelect.addEventListener('change', (e) => startCamera(e.target.value).catch(showError));
+camSelect.addEventListener('change', (e) => startCamera(e.target.value).catch(window.__showError));
+
+// This is what the plain script's start button calls. Only invoked on
+// a user click, so a slow/blocked CDN never blocks page interactivity —
+// it just surfaces a clear error via window.__showError.
+window.__startEngine = async function () {
+  if (!handLandmarker) await createHandLandmarker();
+  await startCamera(currentFacingMode);
+};
+window.__engineReady = true;
 
 // ---------- FX helpers ----------
 function drawScope() {
@@ -429,7 +507,7 @@ function renderLoop() {
   ctx.restore();
 
   // --- Kaleidoscope pre-pass (mirrors the background into quadrants) ---
-  if (currentPreset === 'kaleido') {
+  if (window.__currentPreset === 'kaleido') {
     ctx.save();
     const cx = w/2, cy = h/2;
     [ [1,1],[-1,1],[1,-1],[-1,-1] ].forEach(([sx,sy], i) => {
@@ -460,7 +538,7 @@ function renderLoop() {
     if (allHandsPoints.length < 2) smoothState[1] = {};
 
     // MESH presets
-    if (currentPreset === 'original' || currentPreset === 'glitch') {
+    if (window.__currentPreset === 'original' || window.__currentPreset === 'glitch') {
       if (allHandsPoints.length >= 2) {
         const h1 = allHandsPoints[0], h2 = allHandsPoints[1];
         ctx.beginPath();
@@ -473,7 +551,7 @@ function renderLoop() {
         ctx.closePath();
         ctx.save();
         ctx.clip();
-        ctx.filter = currentPreset==='glitch'
+        ctx.filter = window.__currentPreset==='glitch'
           ? `contrast(280%) saturate(400%) hue-rotate(${(now/15)%360}deg)`
           : 'contrast(250%) saturate(300%) hue-rotate(90deg)';
         ctx.drawImage(offscreenCanvas, 0, 0, w, h);
@@ -502,7 +580,7 @@ function renderLoop() {
     }
 
     // SKELETON preset — clean node/edge graph, TD-network style
-    if (currentPreset === 'skeleton') {
+    if (window.__currentPreset === 'skeleton') {
       allHandsPoints.forEach(hand => {
         ctx.strokeStyle = dotColor;
         ctx.lineWidth = 2;
@@ -522,14 +600,14 @@ function renderLoop() {
     }
 
     // PARTICLE preset — emits from fingertips
-    if (currentPreset === 'particles') {
+    if (window.__currentPreset === 'particles') {
       allHandsPoints.forEach(hand => {
         [4,8,12,16,20].forEach(idx => spawnParticles(hand[idx].x, hand[idx].y, dotColor, 2));
       });
     }
 
     // Halftone dot overlay — shared across most presets for texture continuity
-    if (['halftone','original','kaleido','glitch'].includes(currentPreset)) {
+    if (['halftone','original','kaleido','glitch'].includes(window.__currentPreset)) {
       allHandsPoints.forEach(hand => {
         hand.forEach((pt, idx) => {
           if ([0,4,8,12,16,20].includes(idx)) {
@@ -538,7 +616,7 @@ function renderLoop() {
             ctx.beginPath();
             ctx.arc(pt.x, pt.y, dotRadius, 0, 2*Math.PI);
             ctx.fill();
-            if (currentPreset === 'halftone' || currentPreset === 'original') {
+            if (window.__currentPreset === 'halftone' || window.__currentPreset === 'original') {
               for (let rx=-20; rx<=20; rx+=8) {
                 for (let ry=-20; ry<=20; ry+=8) {
                   ctx.fillRect(pt.x+rx, pt.y+ry, 2, 2);
@@ -571,40 +649,6 @@ function renderLoop() {
 
   requestAnimationFrame(renderLoop);
 }
-
-// ---------- Errors ----------
-function showError(err) {
-  console.error(err);
-  startScreen.style.display = 'none';
-  errorScreen.style.display = 'flex';
-  if (err && err.name === 'NotAllowedError') {
-    errorMsg.textContent = 'Camera permission was denied. Allow camera access in your browser/site settings, then retry.';
-  } else if (err && err.name === 'NotFoundError') {
-    errorMsg.textContent = 'No camera was found on this device.';
-  } else if (location.protocol !== 'https:' && location.hostname !== 'localhost') {
-    errorMsg.textContent = 'Camera access requires HTTPS. Open this page over https:// or from localhost.';
-  }
-}
-retryBtn.addEventListener('click', () => {
-  errorScreen.style.display = 'none';
-  startScreen.style.display = 'flex';
-});
-
-// ---------- Start flow ----------
-startBtn.addEventListener('click', async () => {
-  try {
-    loadStatus.textContent = 'loading model…';
-    startBtn.disabled = true;
-    await createHandLandmarker();
-    loadStatus.textContent = 'requesting camera…';
-    await startCamera(currentFacingMode);
-    startScreen.style.display = 'none';
-  } catch (err) {
-    showError(err);
-  } finally {
-    startBtn.disabled = false;
-  }
-});
 
 // ---------- Fullscreen ----------
 btnFullscreen.addEventListener('click', () => {
